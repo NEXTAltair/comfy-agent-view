@@ -127,6 +127,41 @@ def test_normalize_uses_default_object_info_cache_for_widgets(tmp_path, monkeypa
     assert result.nodes[0].unknown_widgets is None
 
 
+def test_known_widget_map_takes_precedence_over_object_info_order(tmp_path, monkeypatch):
+    config_file = tmp_path / "config" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COMFY_AGENT_VIEW_CONFIG", str(config_file))
+    object_info_cache_path().write_text(
+        json.dumps(
+            {
+                "KSampler": {
+                    "input": {
+                        "required": {
+                            "cfg": ["FLOAT", {}],
+                            "denoise": ["FLOAT", {}],
+                            "sampler_name": ["COMBO", {}],
+                            "scheduler": ["COMBO", {}],
+                            "seed": ["INT", {}],
+                            "steps": ["INT", {}],
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = _workflow(tmp_path / "wf.json")
+
+    result = normalize_workflow(str(path), profile="safe", comfyui_user_dir=str(tmp_path))
+
+    assert result.generation["seed"] == 123
+    assert result.generation["steps"] == 28
+    assert result.generation["cfg"] == 7.0
+    assert result.generation["sampler"] == "dpmpp_2m"
+    assert result.generation["scheduler"] == "karras"
+
+
 def test_fetch_object_info_writes_default_cache(tmp_path, monkeypatch):
     config_file = tmp_path / "config" / "config.toml"
     config_file.parent.mkdir()

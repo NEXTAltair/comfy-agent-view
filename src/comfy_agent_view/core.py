@@ -382,7 +382,7 @@ def _widgets_as_dict(node_type: str, values: Any, object_info: dict[str, Any] | 
         return values
     if not isinstance(values, list):
         return {}
-    names = _object_info_widget_names(node_type, object_info) or WIDGET_MAPS.get(node_type, [])
+    names = WIDGET_MAPS.get(node_type) or _object_info_widget_names(node_type, object_info)
     return {name: values[index] for index, name in enumerate(names) if index < len(values)}
 
 
