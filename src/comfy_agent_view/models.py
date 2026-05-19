@@ -107,6 +107,42 @@ class RepairResult(BaseModel):
     warnings: list[WarningItem] = Field(default_factory=list)
 
 
+class WorkflowPatchOperation(BaseModel):
+    op: Literal["set", "delete_link", "set_input_link"]
+    node_id: int | str | None = None
+    path: list[int | str] | None = None
+    value: Any = None
+    link_id: int | str | None = None
+    input: str | None = None
+
+
+class WorkflowPatchSpec(BaseModel):
+    source: str
+    output: str
+    operations: list[WorkflowPatchOperation]
+
+
+class AppliedWorkflowPatchOperation(BaseModel):
+    op: str
+    node_id: int | str | None = None
+    path: list[int | str] | None = None
+    link_id: int | str | None = None
+    input: str | None = None
+    message: str
+
+
+class WorkflowPatchResult(BaseModel):
+    format: Literal["comfy_workflow_patch_result_v1"] = "comfy_workflow_patch_result_v1"
+    ok: bool
+    dry_run: bool
+    source: SourceInfo
+    output_path: str
+    applied: list[AppliedWorkflowPatchOperation] = Field(default_factory=list)
+    written_path: str | None = None
+    validation: RepairResult | None = None
+    warnings: list[WarningItem] = Field(default_factory=list)
+
+
 class LogFileStatus(BaseModel):
     file: str
     exists: bool

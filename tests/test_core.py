@@ -5,7 +5,15 @@ import json
 import pytest
 
 from comfy_agent_view.config import config_path, object_info_cache_path
-from comfy_agent_view.core import diagnose_load, fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from comfy_agent_view.core import (
+    apply_workflow_patch,
+    diagnose_load,
+    fetch_object_info,
+    list_workflows,
+    normalize_workflow,
+    repair_broken_links,
+    summarize_workflow,
+)
 
 
 def _workflow(path):
@@ -248,6 +256,105 @@ def test_repair_write_requires_output_inside_comfyui_user_dir(tmp_path):
             output_path=str(tmp_path / "outside.json"),
             comfyui_user_dir=str(workflow_dir),
         )
+
+
+def test_apply_workflow_patch_writes_copy_and_sets_widget_value(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    patch_path = tmp_path / "patch.json"
+    output_path = tmp_path / "wf.fixed.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "source": str(path),
+                "output": str(output_path),
+                "operations": [
+                    {"op": "set", "node_id": 4, "path": ["widgets_values", 2], "value": 32},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+
+    assert result.ok is True
+    assert result.written_path == str(output_path.resolve())
+    assert json.loads(path.read_text(encoding="utf-8"))["nodes"][3]["widgets_values"][2] == 28
+    assert json.loads(output_path.read_text(encoding="utf-8"))["nodes"][3]["widgets_values"][2] == 32
+    assert result.applied[0].op == "set"
+
+
+def test_apply_workflow_patch_deletes_link_and_validates(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["links"].append([99, 1, 9, 5, 0, "MODEL"])
+    data["nodes"][4]["inputs"].append({"name": "bad", "link": 99})
+    path.write_text(json.dumps(data), encoding="utf-8")
+    output_path = tmp_path / "wf.fixed.json"
+    patch_path = tmp_path / "patch.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "source": str(path),
+                "output": str(output_path),
+                "operations": [{"op": "delete_link", "link_id": "99"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+    fixed = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert result.validation is not None
+    assert result.validation.broken_links == []
+    assert all(item[0] != 99 for item in fixed["links"])
+    assert fixed["nodes"][4]["inputs"][-1]["link"] is None
+
+
+def test_apply_workflow_patch_retargets_input_link(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    patch_path = tmp_path / "patch.json"
+    output_path = tmp_path / "wf.fixed.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "source": str(path),
+                "output": str(output_path),
+                "operations": [{"op": "set_input_link", "node_id": 5, "input": "images", "link_id": "11"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+    fixed = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert fixed["nodes"][4]["inputs"][0]["link"] == "11"
+    assert fixed["links"][1][3] == 5
+    assert fixed["links"][1][4] == 0
+
+
+def test_apply_workflow_patch_refuses_existing_output_without_overwrite(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    output_path = tmp_path / "wf.fixed.json"
+    output_path.write_text("{}", encoding="utf-8")
+    patch_path = tmp_path / "patch.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "source": str(path),
+                "output": str(output_path),
+                "operations": [{"op": "set", "node_id": 4, "path": ["widgets_values", 2], "value": 32}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Output path already exists"):
+        apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
 
 
 def test_diagnose_load_reads_comfyui_logs_and_ranks_errors(tmp_path, monkeypatch):

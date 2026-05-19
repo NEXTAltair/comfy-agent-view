@@ -10,6 +10,8 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from pydantic import ValidationError
+
 from .config import load_config, object_info_cache_path
 from .models import (
     BrokenLink,
@@ -32,8 +34,12 @@ from .models import (
     SummaryResult,
     UseObjectInfo,
     WarningItem,
+    AppliedWorkflowPatchOperation,
     WorkflowListItem,
     WorkflowListResult,
+    WorkflowPatchOperation,
+    WorkflowPatchResult,
+    WorkflowPatchSpec,
 )
 
 UI_ONLY_NODE_FIELDS = {
@@ -836,6 +842,204 @@ def repair_broken_links(
     )
 
 
+def apply_workflow_patch(
+    patch_path: str,
+    dry_run: bool = True,
+    overwrite: bool = False,
+    comfyui_user_dir: str | None = None,
+) -> WorkflowPatchResult:
+    patch_data, patch_source_path = _load_json_path(patch_path, comfyui_user_dir=comfyui_user_dir)
+    try:
+        spec = WorkflowPatchSpec.model_validate(patch_data)
+    except ValidationError as error:
+        raise ValueError(f"Invalid workflow patch spec: {error}") from error
+    data, source_path = _load_json_path(spec.source, comfyui_user_dir=comfyui_user_dir)
+    output_path = _resolve_allowed_path(spec.output, for_write=True, comfyui_user_dir=comfyui_user_dir)
+    if output_path.exists() and not overwrite and not dry_run:
+        raise ValueError(f"Output path already exists: {output_path}")
+    if source_path == output_path:
+        raise ValueError("Patch output must be different from source.")
+
+    patched = json.loads(json.dumps(data))
+    applied: list[AppliedWorkflowPatchOperation] = []
+    warnings: list[WarningItem] = []
+    for operation in spec.operations:
+        applied.append(_apply_patch_operation(patched, operation))
+
+    validation = _validate_workflow_data(patched, output_path)
+    written_path = None
+    if not dry_run:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(patched, ensure_ascii=False, indent=2), encoding="utf-8")
+        written_path = str(output_path)
+
+    if not spec.operations:
+        warnings.append(WarningItem(code="NO_OPERATIONS", message=f"No operations in patch: {patch_source_path}"))
+
+    return WorkflowPatchResult(
+        ok=validation.ok,
+        dry_run=dry_run,
+        source=SourceInfo(path=str(source_path), name=source_path.name),
+        output_path=str(output_path),
+        applied=applied,
+        written_path=written_path,
+        validation=validation,
+        warnings=warnings + validation.warnings,
+    )
+
+
+def _apply_patch_operation(data: dict[str, Any], operation: WorkflowPatchOperation) -> AppliedWorkflowPatchOperation:
+    if operation.op == "set":
+        if operation.node_id is None or not operation.path:
+            raise ValueError("set operation requires node_id and path.")
+        node = _node_by_id(data, operation.node_id)
+        _set_path(node, operation.path, operation.value)
+        return AppliedWorkflowPatchOperation(
+            op=operation.op,
+            node_id=operation.node_id,
+            path=operation.path,
+            message=f"Set node {operation.node_id} path {operation.path}.",
+        )
+    if operation.op == "delete_link":
+        if operation.link_id is None:
+            raise ValueError("delete_link operation requires link_id.")
+        before = len(_extract_links(data))
+        updated = _remove_links(data, {operation.link_id})
+        data.clear()
+        data.update(updated)
+        after = len(_extract_links(data))
+        if before == after:
+            raise ValueError(f"Link does not exist: {operation.link_id}")
+        return AppliedWorkflowPatchOperation(
+            op=operation.op,
+            link_id=operation.link_id,
+            message=f"Deleted link {operation.link_id}.",
+        )
+    if operation.op == "set_input_link":
+        if operation.node_id is None or operation.input is None or operation.link_id is None:
+            raise ValueError("set_input_link operation requires node_id, input, and link_id.")
+        node = _node_by_id(data, operation.node_id)
+        target_slot, previous_link = _set_node_input_link(node, operation.input, operation.link_id)
+        _retarget_link(data, operation.link_id, operation.node_id, target_slot)
+        _ensure_origin_output_link(data, operation.link_id)
+        return AppliedWorkflowPatchOperation(
+            op=operation.op,
+            node_id=operation.node_id,
+            link_id=operation.link_id,
+            input=operation.input,
+            message=f"Set node {operation.node_id} input {operation.input} to link {operation.link_id}; previous link was {previous_link}.",
+        )
+    raise ValueError(f"Unsupported operation: {operation.op}")
+
+
+def _node_by_id(data: dict[str, Any], node_id: int | str) -> dict[str, Any]:
+    for node in _extract_nodes(data):
+        if str(node.get("id")) == str(node_id):
+            return node
+    raise ValueError(f"Node does not exist: {node_id}")
+
+
+def _set_path(target: dict[str, Any], path: list[int | str], value: Any) -> None:
+    current: Any = target
+    for key in path[:-1]:
+        if isinstance(current, list) and isinstance(key, int):
+            if key < 0 or key >= len(current):
+                raise ValueError(f"Path index out of range: {path}")
+            current = current[key]
+        elif isinstance(current, dict) and isinstance(key, str):
+            if key not in current:
+                raise ValueError(f"Path key does not exist: {path}")
+            current = current[key]
+        else:
+            raise ValueError(f"Path cannot be traversed: {path}")
+    last = path[-1]
+    if isinstance(current, list) and isinstance(last, int):
+        if last < 0 or last >= len(current):
+            raise ValueError(f"Path index out of range: {path}")
+        current[last] = value
+    elif isinstance(current, dict) and isinstance(last, str):
+        if last not in current:
+            raise ValueError(f"Path key does not exist: {path}")
+        current[last] = value
+    else:
+        raise ValueError(f"Path cannot be assigned: {path}")
+
+
+def _set_node_input_link(node: dict[str, Any], input_name: str, link_id: int | str) -> tuple[int, Any]:
+    raw_inputs = node.get("inputs")
+    if isinstance(raw_inputs, list):
+        for index, item in enumerate(raw_inputs):
+            if isinstance(item, dict) and _input_name(item, index) == input_name:
+                previous = item.get("link")
+                item["link"] = link_id
+                return index, previous
+    elif isinstance(raw_inputs, dict):
+        if input_name not in raw_inputs:
+            raise ValueError(f"Input does not exist on node {node.get('id')}: {input_name}")
+        item = raw_inputs[input_name]
+        if isinstance(item, dict):
+            previous = item.get("link")
+            item["link"] = link_id
+        else:
+            previous = item
+            raw_inputs[input_name] = {"link": link_id}
+        return list(raw_inputs).index(input_name), previous
+    raise ValueError(f"Node has no editable inputs: {node.get('id')}")
+
+
+def _retarget_link(data: dict[str, Any], link_id: int | str, target_id: int | str, target_slot: int) -> None:
+    for item in data.get("links", []) or []:
+        if not _id_equal(_raw_link_id(item), link_id):
+            continue
+        if isinstance(item, list):
+            if len(item) < 5:
+                raise ValueError(f"Link is malformed: {link_id}")
+            item[3] = target_id
+            item[4] = target_slot
+            return
+        if isinstance(item, dict):
+            item["target_id"] = target_id
+            item["target_slot"] = target_slot
+            return
+    raise ValueError(f"Link does not exist: {link_id}")
+
+
+def _ensure_origin_output_link(data: dict[str, Any], link_id: int | str) -> None:
+    link = next((item for item in _extract_links(data) if _id_equal(item.get("id"), link_id)), None)
+    if not link:
+        return
+    origin = None
+    for node in _extract_nodes(data):
+        if _id_equal(node.get("id"), link.get("origin_id")):
+            origin = node
+            break
+    outputs = origin.get("outputs") if origin else None
+    origin_slot = link.get("origin_slot")
+    if not isinstance(outputs, list) or not isinstance(origin_slot, int) or origin_slot < 0 or origin_slot >= len(outputs):
+        return
+    output = outputs[origin_slot]
+    if isinstance(output, dict):
+        links = output.setdefault("links", [])
+        if isinstance(links, list) and not any(_id_equal(link_id, existing) for existing in links):
+            links.append(link_id)
+
+
+def _validate_workflow_data(data: dict[str, Any], source_path: Path) -> RepairResult:
+    nodes = _extract_nodes(data)
+    node_by_id = {node.get("id"): node for node in nodes}
+    broken = _detect_broken_links(_extract_links(data), node_by_id)
+    remove_ids = [item.link_id for item in broken]
+    message = "No broken links detected." if not broken else f"{len(broken)} broken link(s) detected."
+    return RepairResult(
+        ok=not broken,
+        source=SourceInfo(path=str(source_path), name=source_path.name),
+        broken_links=broken,
+        would_remove_links=remove_ids,
+        written_path=None,
+        message=message,
+    )
+
+
 def _load_json_path(path: str, comfyui_user_dir: str | None = None) -> tuple[dict[str, Any], Path]:
     source_path = _resolve_allowed_path(path, comfyui_user_dir=comfyui_user_dir)
     with source_path.open("r", encoding="utf-8") as handle:
@@ -1095,15 +1299,23 @@ def _broken(link: dict[str, Any], reason: str) -> BrokenLink:
 
 def _remove_links(data: dict[str, Any], remove_ids: set[Any]) -> dict[str, Any]:
     clone = json.loads(json.dumps(data))
-    clone["links"] = [item for item in clone.get("links", []) if _raw_link_id(item) not in remove_ids]
+    clone["links"] = [item for item in clone.get("links", []) if not _id_in(_raw_link_id(item), remove_ids)]
     for node in _extract_nodes(clone):
         for input_item in node.get("inputs", []) or []:
-            if isinstance(input_item, dict) and input_item.get("link") in remove_ids:
+            if isinstance(input_item, dict) and _id_in(input_item.get("link"), remove_ids):
                 input_item["link"] = None
         for output_item in node.get("outputs", []) or []:
             if isinstance(output_item, dict) and isinstance(output_item.get("links"), list):
-                output_item["links"] = [link for link in output_item["links"] if link not in remove_ids]
+                output_item["links"] = [link for link in output_item["links"] if not _id_in(link, remove_ids)]
     return clone
+
+
+def _id_equal(left: Any, right: Any) -> bool:
+    return str(left) == str(right)
+
+
+def _id_in(value: Any, candidates: set[Any]) -> bool:
+    return any(_id_equal(value, candidate) for candidate in candidates)
 
 
 def _raw_link_id(item: Any) -> Any:

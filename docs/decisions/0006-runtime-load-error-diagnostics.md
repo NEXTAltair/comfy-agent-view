@@ -321,6 +321,16 @@ report は以下の形を目標にする。
 3. **custom node 欠落**: log と object_info から欠落 node type を出す。install / update は提案までで、tool は実行しない。
 4. **workflow 互換修正**: node type 名変更、widget 名変更、不要 node 削除など。原本へ直接書かず、output path への修正版生成を明示操作にする。
 
+workflow 互換修正は agent に raw JSON を直接書き換えさせない。agent は `apply-workflow-patch` 用の patch spec を作り、deterministic script が原本を読んで output path に修正版 copy を書く。
+
+最小 operation は以下に絞る。
+
+- `set`: 指定 node の既存 path に値を代入する。
+- `delete_link`: 指定 link を links と node input/output references から除去する。
+- `set_input_link`: 指定 node input を既存 link に接続し、その link の target を更新する。
+
+`apply-workflow-patch` は source を読み取り専用として扱い、output が source と同じ場合は拒否する。既存 output への書き込みは `--overwrite` なしでは拒否する。実行結果には `applied` operation list と broken-link validation を返す。
+
 `comfyui.db` はこの診断の初期実装でも読まない。必要なら将来 ADR を追加する。
 
 実装時は fixture-driven tests を必須にする。

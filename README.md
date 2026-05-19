@@ -23,6 +23,7 @@ comfy-agent-view summarize /path/to/workflow.json --profile safe
 comfy-agent-view normalize /path/to/workflow.json --profile debug
 comfy-agent-view repair-links /path/to/workflow.json --dry-run
 comfy-agent-view diagnose-load /path/to/workflow.json
+comfy-agent-view apply-workflow-patch /path/to/patch.json --no-dry-run
 comfy-agent-view fetch-object-info --comfy-url http://127.0.0.1:8188
 comfy-agent-view mcp
 ```
@@ -67,6 +68,22 @@ frontend の Error Report は通常不要。既に手元にある場合だけ補
 ```bash
 comfy-agent-view diagnose-load /path/to/workflow.json --error-report-text '...'
 ```
+
+workflow を修正する場合は、agent が workflow 本体を直接編集せず、patch spec を作って `apply-workflow-patch` に渡す。原本は読み取り専用で、修正は必ず `output` に書く。
+
+```json
+{
+  "source": "/path/to/Caption.json",
+  "output": "/path/to/Caption.fixed.json",
+  "operations": [
+    {"op": "set", "node_id": 42, "path": ["widgets_values", 0], "value": "..."},
+    {"op": "delete_link", "link_id": 123},
+    {"op": "set_input_link", "node_id": 51, "input": "image", "link_id": 456}
+  ]
+}
+```
+
+既定は dry-run。実際に書く場合は `--no-dry-run` を付ける。既存 output は `--overwrite` なしでは拒否する。
 
 設定例:
 
