@@ -313,6 +313,50 @@ def test_apply_workflow_patch_deletes_link_and_validates(tmp_path):
     assert fixed["nodes"][4]["inputs"][-1]["link"] is None
 
 
+def test_apply_workflow_patch_deletes_unlinked_node(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["nodes"].append({"id": 99, "type": "PrimitiveString", "inputs": [], "outputs": []})
+    path.write_text(json.dumps(data), encoding="utf-8")
+    output_path = tmp_path / "wf.fixed.json"
+    patch_path = tmp_path / "patch.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "source": str(path),
+                "output": str(output_path),
+                "operations": [{"op": "delete_node", "node_id": 99}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+    fixed = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert all(node["id"] != 99 for node in fixed["nodes"])
+
+
+def test_apply_workflow_patch_refuses_deleting_linked_node(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    output_path = tmp_path / "wf.fixed.json"
+    patch_path = tmp_path / "patch.json"
+    patch_path.write_text(
+        json.dumps(
+            {
+                "source": str(path),
+                "output": str(output_path),
+                "operations": [{"op": "delete_node", "node_id": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="still has link references"):
+        apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+
+
 def test_apply_workflow_patch_retargets_input_link(tmp_path):
     path = _workflow(tmp_path / "wf.json")
     patch_path = tmp_path / "patch.json"

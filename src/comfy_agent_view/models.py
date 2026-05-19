@@ -108,7 +108,7 @@ class RepairResult(BaseModel):
 
 
 class WorkflowPatchOperation(BaseModel):
-    op: Literal["set", "delete_link", "set_input_link"]
+    op: Literal["set", "delete_link", "delete_node", "set_input_link"]
     node_id: int | str | None = None
     path: list[int | str] | None = None
     value: Any = None

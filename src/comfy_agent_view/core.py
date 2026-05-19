@@ -915,6 +915,30 @@ def _apply_patch_operation(data: dict[str, Any], operation: WorkflowPatchOperati
             link_id=operation.link_id,
             message=f"Deleted link {operation.link_id}.",
         )
+    if operation.op == "delete_node":
+        if operation.node_id is None:
+            raise ValueError("delete_node operation requires node_id.")
+        node = _node_by_id(data, operation.node_id)
+        linked_ids = _node_link_ids(node)
+        link_refs = [
+            link.get("id")
+            for link in _extract_links(data)
+            if _id_equal(link.get("origin_id"), operation.node_id)
+            or _id_equal(link.get("target_id"), operation.node_id)
+        ]
+        linked_ids.update(link_id for link_id in link_refs if link_id is not None)
+        if linked_ids:
+            raise ValueError(f"Node {operation.node_id} still has link references: {sorted(linked_ids, key=str)}")
+        before = len(_extract_nodes(data))
+        data["nodes"] = [item for item in data.get("nodes", []) if not (isinstance(item, dict) and _id_equal(item.get("id"), operation.node_id))]
+        after = len(_extract_nodes(data))
+        if before == after:
+            raise ValueError(f"Node does not exist: {operation.node_id}")
+        return AppliedWorkflowPatchOperation(
+            op=operation.op,
+            node_id=operation.node_id,
+            message=f"Deleted unlinked node {operation.node_id}.",
+        )
     if operation.op == "set_input_link":
         if operation.node_id is None or operation.input is None or operation.link_id is None:
             raise ValueError("set_input_link operation requires node_id, input, and link_id.")
@@ -937,6 +961,17 @@ def _node_by_id(data: dict[str, Any], node_id: int | str) -> dict[str, Any]:
         if str(node.get("id")) == str(node_id):
             return node
     raise ValueError(f"Node does not exist: {node_id}")
+
+
+def _node_link_ids(node: dict[str, Any]) -> set[Any]:
+    links: set[Any] = set()
+    for input_item in node.get("inputs", []) or []:
+        if isinstance(input_item, dict) and input_item.get("link") is not None:
+            links.add(input_item["link"])
+    for output_item in node.get("outputs", []) or []:
+        if isinstance(output_item, dict) and isinstance(output_item.get("links"), list):
+            links.update(link for link in output_item["links"] if link is not None)
+    return links
 
 
 def _set_path(target: dict[str, Any], path: list[int | str], value: Any) -> None:
