@@ -30,7 +30,24 @@ MCP serverを使う場合は optional dependency を入れる。
 uv pip install -e '.[mcp]'
 ```
 
-任意パス読み取りを制限したい場合は、`COMFY_AGENT_VIEW_ALLOWED_ROOTS` または CLI の `--allowed-root` を使う。
+読み取り範囲は ComfyUI の `user` ディレクトリ配下に限定する。恒久設定は user config に書き、CLI の `--comfyui-user-dir` は一時実行やデバッグだけに使う。
+
+user config の場所は次で確認できる。
+
+```bash
+comfy-agent-view --print-config-path
+```
+
+設定例:
+
+```toml
+[comfy_agent_view]
+comfyui_user_dir = "H:\\StabilityMatrix-win-x64\\Data\\Packages\\ComfyUI\\user"
+default_profile = "safe"
+allow_full_profile = true
+```
+
+設定がない状態で workflow path を読むとエラーになる。推測で任意パスを読む fallback は持たない。
 
 ## Interfaces
 

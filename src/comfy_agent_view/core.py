@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import load_config
 from .models import (
     BrokenLink,
     NormalizeResult,
@@ -59,8 +58,13 @@ PRIVATE_MODEL_KEYS = {"checkpoints", "loras", "vae", "controlnet"}
 PRIVATE_INPUT_KEYS = {"filename_prefix", "image", "upload"}
 
 
-def list_workflows(root: str, recursive: bool = True, limit: int = 100) -> WorkflowListResult:
-    root_path = _resolve_allowed_path(root)
+def list_workflows(
+    root: str | None = None,
+    recursive: bool = True,
+    limit: int = 100,
+    comfyui_user_dir: str | None = None,
+) -> WorkflowListResult:
+    root_path = _resolve_allowed_path(root or _comfyui_user_dir(comfyui_user_dir), comfyui_user_dir=comfyui_user_dir)
     warnings: list[WarningItem] = []
     if not root_path.exists():
         return WorkflowListResult(
@@ -96,11 +100,16 @@ def list_workflows(root: str, recursive: bool = True, limit: int = 100) -> Workf
     return WorkflowListResult(root=str(root_path), workflows=items, warnings=warnings)
 
 
-def summarize_workflow(path: str, profile: Profile = "safe", detail: str = "compact") -> SummaryResult:
-    normalized = normalize_workflow(path=path, profile=profile, use_object_info="never")
+def summarize_workflow(
+    path: str,
+    profile: Profile = "safe",
+    detail: str = "compact",
+    comfyui_user_dir: str | None = None,
+) -> SummaryResult:
+    normalized = normalize_workflow(path=path, profile=profile, use_object_info="never", comfyui_user_dir=comfyui_user_dir)
     stats = {
         "node_count": len(normalized.nodes),
-        "link_count": _count_links(_load_json_path(path)[0]),
+        "link_count": _count_links(_load_json_path(path, comfyui_user_dir=comfyui_user_dir)[0]),
         "custom_node_count": _custom_node_count(normalized.nodes),
         "unknown_widget_nodes": sum(1 for node in normalized.nodes if node.unknown_widgets),
         "broken_link_count": sum(1 for warning in normalized.warnings if warning.code.startswith("BROKEN_")),
@@ -127,8 +136,9 @@ def normalize_workflow(
     profile: Profile = "safe",
     comfy_url: str | None = None,
     use_object_info: UseObjectInfo = "auto",
+    comfyui_user_dir: str | None = None,
 ) -> NormalizeResult:
-    data, source_path = _load_json_path(path)
+    data, source_path = _load_json_path(path, comfyui_user_dir=comfyui_user_dir)
     nodes_raw = _extract_nodes(data)
     node_by_id = {node.get("id"): node for node in nodes_raw}
     links = _extract_links(data)
@@ -199,8 +209,13 @@ def normalize_workflow(
     )
 
 
-def repair_broken_links(path: str, dry_run: bool = True, output_path: str | None = None) -> RepairResult:
-    data, source_path = _load_json_path(path)
+def repair_broken_links(
+    path: str,
+    dry_run: bool = True,
+    output_path: str | None = None,
+    comfyui_user_dir: str | None = None,
+) -> RepairResult:
+    data, source_path = _load_json_path(path, comfyui_user_dir=comfyui_user_dir)
     nodes = _extract_nodes(data)
     node_by_id = {node.get("id"): node for node in nodes}
     links = _extract_links(data)
@@ -215,7 +230,7 @@ def repair_broken_links(path: str, dry_run: bool = True, output_path: str | None
                 WarningItem(level="error", code="OUTPUT_PATH_REQUIRED", message="output_path is required when dry_run is false.")
             )
         else:
-            out = _resolve_allowed_path(output_path, for_write=True)
+            out = _resolve_allowed_path(output_path, for_write=True, comfyui_user_dir=comfyui_user_dir)
             repaired = _remove_links(data, set(remove_ids))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(repaired, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -240,8 +255,8 @@ def repair_broken_links(path: str, dry_run: bool = True, output_path: str | None
     )
 
 
-def _load_json_path(path: str) -> tuple[dict[str, Any], Path]:
-    source_path = _resolve_allowed_path(path)
+def _load_json_path(path: str, comfyui_user_dir: str | None = None) -> tuple[dict[str, Any], Path]:
+    source_path = _resolve_allowed_path(path, comfyui_user_dir=comfyui_user_dir)
     with source_path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
@@ -249,21 +264,23 @@ def _load_json_path(path: str) -> tuple[dict[str, Any], Path]:
     return data, source_path
 
 
-def _resolve_allowed_path(path: str, for_write: bool = False) -> Path:
+def _resolve_allowed_path(path: str, for_write: bool = False, comfyui_user_dir: str | None = None) -> Path:
     resolved = Path(path).expanduser().resolve()
-    roots = _allowed_roots()
-    if roots and not any(_is_relative_to(resolved, root) for root in roots):
-        raise PermissionError(f"Path is outside allowed roots: {resolved}")
-    if for_write and roots and not any(_is_relative_to(resolved.parent, root) for root in roots):
-        raise PermissionError(f"Output path is outside allowed roots: {resolved}")
+    root = Path(_comfyui_user_dir(comfyui_user_dir)).expanduser().resolve()
+    if not _is_relative_to(resolved, root):
+        raise PermissionError(f"Path is outside comfyui_user_dir: {resolved}")
+    if for_write and not _is_relative_to(resolved.parent, root):
+        raise PermissionError(f"Output path is outside comfyui_user_dir: {resolved}")
     return resolved
 
 
-def _allowed_roots() -> list[Path]:
-    raw = os.environ.get("COMFY_AGENT_VIEW_ALLOWED_ROOTS", "").strip()
-    if not raw:
-        return []
-    return [Path(part).expanduser().resolve() for part in raw.split(os.pathsep) if part.strip()]
+def _comfyui_user_dir(override: str | None = None) -> str:
+    if override and override.strip():
+        return override
+    configured = load_config().comfyui_user_dir
+    if not configured:
+        raise PermissionError("comfyui_user_dir is not configured.")
+    return configured
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

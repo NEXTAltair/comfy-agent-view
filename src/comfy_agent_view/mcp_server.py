@@ -12,7 +12,7 @@ def run() -> None:
     mcp = FastMCP("comfy-agent-view")
 
     @mcp.tool()
-    def comfy_workflow_list(root: str, recursive: bool = True, limit: int = 100) -> dict:
+    def comfy_workflow_list(root: str | None = None, recursive: bool = True, limit: int = 100) -> dict:
         """List ComfyUI workflow JSON files."""
         return list_workflows(root=root, recursive=recursive, limit=limit).model_dump(mode="json")
 
