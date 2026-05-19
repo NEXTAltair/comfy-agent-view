@@ -22,6 +22,7 @@ comfy-agent-view list /path/to/other/workflows
 comfy-agent-view summarize /path/to/workflow.json --profile safe
 comfy-agent-view normalize /path/to/workflow.json --profile debug
 comfy-agent-view repair-links /path/to/workflow.json --dry-run
+comfy-agent-view diagnose-load /path/to/workflow.json
 comfy-agent-view fetch-object-info --comfy-url http://127.0.0.1:8188
 comfy-agent-view mcp
 ```
@@ -52,6 +53,18 @@ comfy-agent-view --print-object-info-path
 ```
 
 既定保存先は user config と同じディレクトリの `object_info.json`。`normalize` / `summarize` はこの既定キャッシュがあれば自動で参照し、なければ静的 fallback を使う。
+
+ComfyUI 上で workflow 読み込みエラーになる場合は、`diagnose-load` を使う。これは workflow 静的診断、`object_info` cache、`comfyui_user_dir` 直下の `comfyui.log` / `comfyui.prev.log` / `comfyui.prev2.log` を読み、正規化された小さい診断 report を返す。log 全文や prompt 本文は返さない。
+
+```bash
+comfy-agent-view diagnose-load /path/to/workflow.json
+```
+
+frontend の Error Report は通常不要。既に手元にある場合だけ補助入力として渡せる。
+
+```bash
+comfy-agent-view diagnose-load /path/to/workflow.json --error-report-text '...'
+```
 
 設定例:
 

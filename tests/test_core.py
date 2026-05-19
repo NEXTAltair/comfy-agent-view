@@ -5,7 +5,7 @@ import json
 import pytest
 
 from comfy_agent_view.config import config_path, object_info_cache_path
-from comfy_agent_view.core import fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from comfy_agent_view.core import diagnose_load, fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
 
 
 def _workflow(path):
@@ -248,6 +248,58 @@ def test_repair_write_requires_output_inside_comfyui_user_dir(tmp_path):
             output_path=str(tmp_path / "outside.json"),
             comfyui_user_dir=str(workflow_dir),
         )
+
+
+def test_diagnose_load_reads_comfyui_logs_and_ranks_errors(tmp_path, monkeypatch):
+    config_file = tmp_path / "config" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COMFY_AGENT_VIEW_CONFIG", str(config_file))
+    path = _workflow(tmp_path / "wf.json")
+    (tmp_path / "comfyui.log").write_text(
+        "\n".join(
+            [
+                "2026-05-19T11:43:49.614727 - Starting server",
+                "2026-05-19T11:43:57.337383 - [DEPRECATION WARNING] Detected import of deprecated legacy API: /scripts/ui.js.",
+                "2026-05-19T11:44:10.000000 - [ComfyUI-Manager] Failed to import custom node ExampleNode from H:\\ComfyUI\\custom_nodes\\example\\node.py: ImportError: missing thing",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = diagnose_load(str(path), comfyui_user_dir=str(tmp_path))
+
+    assert result.format == "comfy_runtime_diagnostic_v1"
+    assert result.logs.file_status[0].exists is True
+    assert result.logs.file_status[0].readable is True
+    assert result.logs.matched_errors[0].category == "custom_node_import_error"
+    assert "[PATH:node.py]" in result.logs.matched_errors[0].message
+    assert result.logs.noise_counts["deprecated_api"] == 1
+
+
+def test_diagnose_load_reports_broken_origin_slot_from_frontend_error(tmp_path, monkeypatch):
+    config_file = tmp_path / "config" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COMFY_AGENT_VIEW_CONFIG", str(config_file))
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["links"].append([99, 1, 9, 5, 0, "MODEL"])
+    path.write_text(json.dumps(data), encoding="utf-8")
+    report = """
+## Error Details
+- **Exception Type:** ワークフローデータの再読み込みエラーにより、読み込みが中止されました
+- **Exception Message:** TypeError: can't access property "type", node.outputs[link_info.origin_slot] is undefined
+beforeRegisterNodeDef/nodeType.prototype.onConnectionsChange@http://127.0.0.1:8188/extensions/ComfyUI-Impact-Pack/impact-pack.js:399:6
+"""
+
+    result = diagnose_load(str(path), comfyui_user_dir=str(tmp_path), error_report_text=report)
+
+    assert result.static.broken_link_count == 1
+    assert result.frontend_error["present"] is True
+    assert result.frontend_error["extension"] == "ComfyUI-Impact-Pack"
+    assert result.repair_plan[0].action == "run_repair_links"
+    assert result.optional_inputs["error_report_text"] == "not_required"
 
 
 def test_comfyui_user_dir_can_come_from_user_config(tmp_path, monkeypatch):

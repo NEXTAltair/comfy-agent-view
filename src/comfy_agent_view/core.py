@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+from collections import Counter
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -10,12 +13,19 @@ from urllib.request import urlopen
 from .config import load_config, object_info_cache_path
 from .models import (
     BrokenLink,
+    LogFileStatus,
     NormalizeResult,
     NormalizedNode,
     ObjectInfoFetchResult,
     Profile,
     PromptPresence,
     RepairResult,
+    RuntimeDiagnosticEvent,
+    RuntimeLoadDiagnosticResult,
+    RuntimeLogsDiagnostics,
+    RuntimeObjectInfoDiagnostics,
+    RuntimeRepairPlanItem,
+    RuntimeStaticDiagnostics,
     SourceInfo,
     SummaryResult,
     UseObjectInfo,
@@ -61,6 +71,19 @@ WIDGET_MAPS: dict[str, list[str]] = {
 
 PRIVATE_MODEL_KEYS = {"checkpoints", "loras", "vae", "controlnet", "unet", "clip"}
 PRIVATE_INPUT_KEYS = {"filename_prefix", "image", "upload"}
+LOG_FILES = ("comfyui.log", "comfyui.prev.log", "comfyui.prev2.log")
+LOG_TAIL_BYTES = 1024 * 1024
+LOG_TAIL_LINES = 5000
+LOG_MAX_EVENTS = 200
+LOG_MAX_MESSAGE = 500
+
+_ISO_TS_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s*-\s*")
+_BRACKET_TS_RE = re.compile(r"^\[(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\(?:[^\\\s:]+\\)*([^\\\s:]+)")
+_POSIX_PATH_RE = re.compile(r"(?<!\w)/(?:[^\s/]+/)+([^\s/]+)")
+_URL_RE = re.compile(r"https?://[^\s)]+")
+_SOURCE_RE = re.compile(r"\[([A-Za-z0-9_.: -]{2,80})\]")
 
 
 def list_workflows(
@@ -234,6 +257,467 @@ def fetch_object_info(comfy_url: str = "http://127.0.0.1:8188") -> ObjectInfoFet
         node_count=len(data),
         message=f"Cached {len(data)} node definitions.",
     )
+
+
+def diagnose_load(
+    path: str,
+    comfyui_user_dir: str | None = None,
+    error_report_text: str | None = None,
+) -> RuntimeLoadDiagnosticResult:
+    data, source_path = _load_json_path(path, comfyui_user_dir=comfyui_user_dir)
+    warnings: list[WarningItem] = []
+    normalized = normalize_workflow(path=path, profile="safe", use_object_info="auto", comfyui_user_dir=comfyui_user_dir)
+    repair = repair_broken_links(path=path, dry_run=True, comfyui_user_dir=comfyui_user_dir)
+    object_info = _object_info_diagnostics(data)
+    log_statuses, events = _read_runtime_log_events(comfyui_user_dir=comfyui_user_dir)
+    if error_report_text:
+        events.extend(_parse_error_report_text(error_report_text))
+
+    workflow_terms = _workflow_terms(normalized)
+    ranked_events = _rank_events(events, workflow_terms)
+    matched_errors = ranked_events[:LOG_MAX_EVENTS]
+    noise_counts = Counter(event.category for event in events if event.category in {"startup_info", "deprecated_api", "manager_cache_warning"})
+    frontend = _frontend_error_summary(events, bool(error_report_text))
+    repair_plan = _runtime_repair_plan(repair, object_info, matched_errors)
+
+    if not error_report_text and not matched_errors and not repair.broken_links:
+        optional_state = "helpful_if_frontend_only_error_persists"
+    else:
+        optional_state = "not_required"
+
+    return RuntimeLoadDiagnosticResult(
+        workflow=str(source_path),
+        source=SourceInfo(path=str(source_path), name=source_path.name),
+        static=RuntimeStaticDiagnostics(
+            normalize_ok=not any(warning.level == "error" for warning in normalized.warnings),
+            broken_link_count=len(repair.broken_links),
+            unknown_widget_nodes=sum(1 for node in normalized.nodes if node.unknown_widgets),
+            warnings=normalized.warnings + repair.warnings,
+        ),
+        object_info=object_info,
+        logs=RuntimeLogsDiagnostics(
+            files_checked=list(LOG_FILES),
+            file_status=log_statuses,
+            events_scanned=len(events),
+            events_returned=len(matched_errors),
+            noise_counts=dict(noise_counts),
+            matched_errors=matched_errors,
+        ),
+        optional_inputs={"error_report_text": optional_state},
+        frontend_error=frontend,
+        repair_plan=repair_plan,
+        warnings=warnings,
+    )
+
+
+def _object_info_diagnostics(data: dict[str, Any]) -> RuntimeObjectInfoDiagnostics:
+    path = object_info_cache_path()
+    exists = path.exists()
+    valid = False
+    stale = True
+    node_count = 0
+    stale_reason = "missing" if not exists else "metadata_missing"
+    object_info: dict[str, Any] | None = None
+    if exists:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+            stale_reason = "invalid"
+        if isinstance(loaded, dict):
+            valid = True
+            object_info = loaded
+            node_count = len(loaded)
+            if _looks_like_object_info_with_metadata(loaded):
+                stale = False
+                stale_reason = None
+    node_types = sorted({str(node.get("type")) for node in _extract_nodes(data) if node.get("type")})
+    missing = [node_type for node_type in node_types if object_info is not None and node_type not in object_info]
+    return RuntimeObjectInfoDiagnostics(
+        path=str(path),
+        exists=exists,
+        valid=valid,
+        stale=stale,
+        node_count=node_count,
+        missing_node_types=missing,
+        stale_reason=stale_reason,
+    )
+
+
+def _looks_like_object_info_with_metadata(data: dict[str, Any]) -> bool:
+    metadata = data.get("_metadata") or data.get("metadata")
+    return isinstance(metadata, dict) and bool(metadata.get("fetched_at"))
+
+
+def _read_runtime_log_events(comfyui_user_dir: str | None = None) -> tuple[list[LogFileStatus], list[RuntimeDiagnosticEvent]]:
+    user_dir = Path(_comfyui_user_dir(comfyui_user_dir)).expanduser().resolve()
+    statuses: list[LogFileStatus] = []
+    events: list[RuntimeDiagnosticEvent] = []
+    for name in LOG_FILES:
+        log_path = (user_dir / name).resolve()
+        if not _is_relative_to(log_path, user_dir):
+            statuses.append(LogFileStatus(file=name, exists=False, readable=False, error="outside comfyui_user_dir"))
+            continue
+        status, parsed = _read_one_log_file(log_path, name)
+        statuses.append(status)
+        events.extend(parsed)
+    return statuses, _dedupe_events(events)
+
+
+def _read_one_log_file(path: Path, name: str) -> tuple[LogFileStatus, list[RuntimeDiagnosticEvent]]:
+    if not path.exists():
+        return LogFileStatus(file=name, exists=False, readable=False), []
+    try:
+        stat = path.stat()
+        with path.open("rb") as handle:
+            if stat.st_size > LOG_TAIL_BYTES:
+                handle.seek(-LOG_TAIL_BYTES, 2)
+            raw = handle.read(LOG_TAIL_BYTES)
+    except OSError as error:
+        return LogFileStatus(file=name, exists=True, readable=False, error=str(error)), []
+
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    truncated = stat.st_size > LOG_TAIL_BYTES
+    if len(lines) > LOG_TAIL_LINES:
+        lines = lines[-LOG_TAIL_LINES:]
+        truncated = True
+    status = LogFileStatus(
+        file=name,
+        exists=True,
+        readable=True,
+        size_bytes=stat.st_size,
+        mtime=datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        bytes_read=len(raw),
+        lines_read=len(lines),
+        truncated=truncated,
+    )
+    return status, _parse_log_lines(name, lines)
+
+
+def _parse_log_lines(file_name: str, lines: list[str]) -> list[RuntimeDiagnosticEvent]:
+    raw_events: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for index, line in enumerate(lines, start=1):
+        clean = _ANSI_RE.sub("", line)
+        timestamp, message = _split_timestamp(clean)
+        if timestamp:
+            if current:
+                raw_events.append(current)
+            current = {"timestamp": timestamp, "line_start": index, "line_end": index, "message": message}
+        elif current:
+            current["line_end"] = index
+            current["message"] = f"{current['message']}\n{clean}".strip()
+        elif clean.strip():
+            current = {"timestamp": None, "line_start": index, "line_end": index, "message": clean}
+    if current:
+        raw_events.append(current)
+
+    return [_event_from_message(file_name, item) for item in raw_events if str(item.get("message") or "").strip()]
+
+
+def _split_timestamp(line: str) -> tuple[str | None, str]:
+    match = _ISO_TS_RE.match(line) or _BRACKET_TS_RE.match(line)
+    if not match:
+        return None, line.strip()
+    timestamp = _normalize_timestamp(match.group("ts"))
+    message = line[match.end() :].strip()
+    message = _ISO_TS_RE.sub("", message)
+    message = _BRACKET_TS_RE.sub("", message)
+    return timestamp, message.strip()
+
+
+def _normalize_timestamp(value: str) -> str:
+    normalized = value.replace(" ", "T")
+    try:
+        return datetime.fromisoformat(normalized).isoformat()
+    except ValueError:
+        return normalized
+
+
+def _event_from_message(file_name: str | None, item: dict[str, Any]) -> RuntimeDiagnosticEvent:
+    message = _redact_log_message(str(item.get("message") or ""))
+    severity = _severity(message)
+    category = _category(message)
+    source = _source(message)
+    extension = _extension(message)
+    exception_type = _exception_type(message)
+    node_type = _node_type_hint(message)
+    package = extension or source
+    fingerprint = _event_fingerprint(category, source, node_type, package, exception_type, message)
+    return RuntimeDiagnosticEvent(
+        file=file_name,
+        line_start=item.get("line_start"),
+        line_end=item.get("line_end"),
+        timestamp=item.get("timestamp"),
+        severity=severity,
+        category=category,
+        source=source,
+        node_type=node_type,
+        package=package,
+        exception_type=exception_type,
+        extension=extension,
+        message=_limit_message(message),
+        fingerprint=fingerprint,
+        confidence="low",
+    )
+
+
+def _parse_error_report_text(text: str) -> list[RuntimeDiagnosticEvent]:
+    message_match = re.search(r"Exception Message:\*\*\s*(.+)", text)
+    type_match = re.search(r"Exception Type:\*\*\s*(.+)", text)
+    stack_match = re.search(r"/extensions/([^/\s]+)/([^:\s]+\.js):(\d+)", text)
+    message = message_match.group(1).strip() if message_match else text.strip().splitlines()[0]
+    redacted = _redact_log_message(message)
+    extension = stack_match.group(1) if stack_match else None
+    asset = stack_match.group(2) if stack_match else None
+    exception_type = _exception_type(redacted)
+    if type_match and not exception_type:
+        exception_type = type_match.group(1).strip()
+    event = RuntimeDiagnosticEvent(
+        source="comfyui_frontend_error_report",
+        severity="error",
+        category=_category(redacted),
+        exception_type=exception_type,
+        message=_limit_message(redacted),
+        extension=extension,
+        package=extension,
+        fingerprint=_event_fingerprint(_category(redacted), "comfyui_frontend_error_report", None, extension, exception_type, redacted),
+        confidence="medium",
+    )
+    if asset and extension:
+        event.message = f"{event.message} [extension={extension} asset={asset}]"
+    return [event]
+
+
+def _dedupe_events(events: list[RuntimeDiagnosticEvent]) -> list[RuntimeDiagnosticEvent]:
+    by_key: dict[str, RuntimeDiagnosticEvent] = {}
+    for event in events:
+        existing = by_key.get(event.fingerprint)
+        if existing:
+            existing.count += 1
+            existing.line_end = event.line_end or existing.line_end
+            existing.timestamp = event.timestamp or existing.timestamp
+        else:
+            by_key[event.fingerprint] = event
+    return list(by_key.values())
+
+
+def _rank_events(events: list[RuntimeDiagnosticEvent], workflow_terms: set[str]) -> list[RuntimeDiagnosticEvent]:
+    ranked = sorted(events, key=lambda event: _event_score(event, workflow_terms), reverse=True)
+    for event in ranked:
+        event.confidence = _event_confidence(event, workflow_terms)
+    return [event for event in ranked if event.severity in {"error", "warning"} and event.category != "startup_info"]
+
+
+def _event_score(event: RuntimeDiagnosticEvent, workflow_terms: set[str]) -> tuple[int, int, int, int, int]:
+    severity_score = {"error": 4, "warning": 3, "info": 2, "debug": 1}.get(event.severity, 0)
+    relevance = 1 if _event_matches_workflow(event, workflow_terms) else 0
+    category_score = {
+        "broken_origin_slot": 9,
+        "frontend_graph_load_error": 8,
+        "custom_node_import_error": 7,
+        "missing_custom_node": 7,
+        "missing_python_module": 6,
+        "model_resolution_warning": 5,
+        "missing_optional_dependency": 4,
+        "deprecated_api": 2,
+        "manager_cache_warning": 1,
+    }.get(event.category, 0)
+    recency = _timestamp_sort_value(event.timestamp)
+    return (severity_score, relevance, category_score, recency, min(event.count, 10))
+
+
+def _timestamp_sort_value(timestamp: str | None) -> int:
+    if not timestamp:
+        return 0
+    try:
+        return int(datetime.fromisoformat(timestamp).timestamp())
+    except ValueError:
+        return 0
+
+
+def _event_confidence(event: RuntimeDiagnosticEvent, workflow_terms: set[str]) -> str:
+    if event.category in {"broken_origin_slot", "frontend_graph_load_error"} and _event_matches_workflow(event, workflow_terms):
+        return "high"
+    if _event_matches_workflow(event, workflow_terms):
+        return "high"
+    if event.severity == "error" and event.category != "unknown":
+        return "medium"
+    return "low"
+
+
+def _event_matches_workflow(event: RuntimeDiagnosticEvent, workflow_terms: set[str]) -> bool:
+    candidates = [event.node_type, event.package, event.source, event.extension]
+    return any(candidate and candidate in workflow_terms for candidate in candidates)
+
+
+def _workflow_terms(normalized: NormalizeResult) -> set[str]:
+    terms = {node.type for node in normalized.nodes}
+    for values in normalized.models.values():
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, dict):
+                    terms.update(str(item) for item in value.values() if item)
+                elif value:
+                    terms.add(str(value))
+    return terms
+
+
+def _frontend_error_summary(events: list[RuntimeDiagnosticEvent], provided: bool) -> dict[str, Any]:
+    frontend = [event for event in events if event.category in {"frontend_graph_load_error", "broken_origin_slot"}]
+    if not frontend:
+        return {"present": False, "input_provided": provided}
+    event = frontend[0]
+    return {
+        "present": True,
+        "input_provided": provided,
+        "category": event.category,
+        "exception_type": event.exception_type,
+        "extension": event.extension,
+        "message": event.message,
+    }
+
+
+def _runtime_repair_plan(
+    repair: RepairResult,
+    object_info: RuntimeObjectInfoDiagnostics,
+    events: list[RuntimeDiagnosticEvent],
+) -> list[RuntimeRepairPlanItem]:
+    plan: list[RuntimeRepairPlanItem] = []
+    if repair.broken_links or any(event.category in {"broken_origin_slot", "frontend_graph_load_error"} for event in events):
+        plan.append(
+            RuntimeRepairPlanItem(
+                kind="broken_origin_slot",
+                action="run_repair_links",
+                confidence="high" if repair.broken_links else "medium",
+                message="Run repair-links dry-run and inspect broken origin slot warnings.",
+            )
+        )
+    if object_info.stale:
+        plan.append(
+            RuntimeRepairPlanItem(
+                kind="object_info_stale",
+                action="fetch_object_info",
+                confidence="medium",
+                message="Refresh the cached /object_info before diagnosing custom nodes.",
+            )
+        )
+    if object_info.missing_node_types:
+        plan.append(
+            RuntimeRepairPlanItem(
+                kind="missing_custom_node",
+                action="inspect_custom_node_install",
+                confidence="medium",
+                message=f"Missing node types in object_info: {', '.join(object_info.missing_node_types[:10])}.",
+            )
+        )
+    return plan
+
+
+def _severity(message: str) -> str:
+    lower = message.lower()
+    if any(token in message for token in ("ERROR", "Exception", "Traceback", "Cannot import", "ModuleNotFoundError", "ImportError")):
+        return "error"
+    if "warning" in lower or "not installed" in lower or "outdated cache" in lower:
+        return "warning"
+    if "debug" in lower:
+        return "debug"
+    return "info"
+
+
+def _category(message: str) -> str:
+    lower = message.lower()
+    if "node.outputs" in lower and "origin_slot" in lower and "undefined" in lower:
+        return "broken_origin_slot"
+    if "modulenotfounderror" in lower:
+        return "missing_python_module"
+    if any(token in lower for token in ("importerror", "cannot import", "failed to import custom node")):
+        return "custom_node_import_error"
+    if "not installed" in lower:
+        return "missing_optional_dependency"
+    if "deprecation warning" in lower or "deprecated legacy api" in lower:
+        return "deprecated_api"
+    if any(token in lower for token in ("model not found", "checkpoint not found", "lora not found", "vae not found")):
+        return "model_resolution_warning"
+    if "comfyui-manager" in lower and any(token in lower for token in ("cache", "registry")):
+        return "manager_cache_warning"
+    if any(token in lower for token in ("startup time", "python version", "comfyui version", "starting server", "device:")):
+        return "startup_info"
+    if "error" in lower or "exception" in lower:
+        return "unknown"
+    return "startup_info"
+
+
+def _source(message: str) -> str | None:
+    match = _SOURCE_RE.search(message)
+    if match:
+        return match.group(1).strip()
+    for name in ("ComfyUI-Manager", "LoRA-Manager", "Impact Pack", "Inspire Pack", "rgthree-comfy", "WAS Node Suite"):
+        if name.lower() in message.lower():
+            return name
+    return None
+
+
+def _extension(message: str) -> str | None:
+    match = re.search(r"extensions/([^/\s]+)/", message)
+    if match:
+        return match.group(1)
+    if "ComfyUI-Impact-Pack" in message:
+        return "ComfyUI-Impact-Pack"
+    return None
+
+
+def _exception_type(message: str) -> str | None:
+    match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\b", message)
+    return match.group(1) if match else None
+
+
+def _node_type_hint(message: str) -> str | None:
+    match = re.search(r"node type ['\"]?([A-Za-z0-9_ -]+)['\"]?", message, re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+
+def _redact_log_message(message: str) -> str:
+    redacted = _URL_RE.sub(_redact_url, message)
+    redacted = _WINDOWS_PATH_RE.sub(lambda match: f"[PATH:{match.group(1)}]", redacted)
+    redacted = _POSIX_PATH_RE.sub(lambda match: f"[PATH:{match.group(1)}]", redacted)
+    redacted = re.sub(r"(?i)(api[_-]?key|token|password|secret)=\S+", r"\1=[REDACTED]", redacted)
+    redacted = re.sub(r'"([^"]{121,})"', lambda match: _redact_long_string(match.group(1)), redacted)
+    return redacted.strip()
+
+
+def _redact_url(match: re.Match[str]) -> str:
+    value = match.group(0)
+    asset = re.search(r"/extensions/([^/\s]+)/([^:\s]+\.js)(?::(\d+))?", value)
+    if asset:
+        line = f":{asset.group(3)}" if asset.group(3) else ""
+        return f"extension={asset.group(1)} asset={asset.group(2)}{line}"
+    return "[URL]"
+
+
+def _redact_long_string(value: str) -> str:
+    digest = sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f'"[REDACTED:length={len(value)} sha256={digest}]"'
+
+
+def _limit_message(message: str) -> str:
+    if len(message) <= LOG_MAX_MESSAGE:
+        return message
+    digest = sha256(message.encode("utf-8")).hexdigest()[:12]
+    return f"{message[:LOG_MAX_MESSAGE]}... [TRUNCATED sha256={digest}]"
+
+
+def _event_fingerprint(
+    category: str,
+    source: str | None,
+    node_type: str | None,
+    package: str | None,
+    exception_type: str | None,
+    message: str,
+) -> str:
+    payload = "|".join(str(item or "") for item in (category, source, node_type, package, exception_type, message))
+    return f"sha256:{sha256(payload.encode('utf-8')).hexdigest()}"
 
 
 def repair_broken_links(

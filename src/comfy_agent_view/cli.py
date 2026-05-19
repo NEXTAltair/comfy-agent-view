@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from .config import config_path, object_info_cache_path
-from .core import fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from .core import diagnose_load, fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -47,6 +47,10 @@ def main(argv: list[str] | None = None) -> None:
     repair_parser.add_argument("path")
     repair_parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
     repair_parser.add_argument("--output-path")
+
+    diagnose_parser = subparsers.add_parser("diagnose-load")
+    diagnose_parser.add_argument("path")
+    diagnose_parser.add_argument("--error-report-text")
 
     object_info_parser = subparsers.add_parser("fetch-object-info")
     object_info_parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
@@ -99,6 +103,14 @@ def main(argv: list[str] | None = None) -> None:
                     dry_run=args.dry_run,
                     output_path=args.output_path,
                     comfyui_user_dir=args.comfyui_user_dir,
+                ).model_dump(mode="json")
+            )
+        elif args.command == "diagnose-load":
+            _print(
+                diagnose_load(
+                    path=args.path,
+                    comfyui_user_dir=args.comfyui_user_dir,
+                    error_report_text=args.error_report_text,
                 ).model_dump(mode="json")
             )
         elif args.command == "fetch-object-info":
