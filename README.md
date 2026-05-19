@@ -60,6 +60,8 @@ ComfyUI 上で workflow 読み込みエラーになる場合は、`diagnose-load
 comfy-agent-view diagnose-load /path/to/workflow.json
 ```
 
+出力は人間向け文章ではなく agent handoff 用 JSON。最上位の `summary.status`, `summary.primary_issue`, `summary.next_action` を読めば次の安全な操作候補が分かる。
+
 frontend の Error Report は通常不要。既に手元にある場合だけ補助入力として渡せる。
 
 ```bash

@@ -226,7 +226,27 @@ report は以下の形を目標にする。
 ```python
 {
     "format": "comfy_runtime_diagnostic_v1",
+    "summary": {
+        "status": "needs_repair",
+        "primary_issue": "broken_origin_slot",
+        "confidence": "high",
+        "next_action": {
+            "tool": "repair-links",
+            "args": {"path": ".../Caption.json", "dry_run": true},
+            "command": ["comfy-agent-view", "repair-links", ".../Caption.json", "--dry-run"],
+            "safe_to_run": true,
+            "writes_files": false,
+            "requires_user_approval": false,
+        },
+    },
     "workflow": ".../Caption.json",
+    "evidence": [
+        {
+            "category": "frontend_graph_load_error",
+            "confidence": "high",
+            "message": "can't access property \"type\", node.outputs[link_info.origin_slot] is undefined",
+        }
+    ],
     "static": {
         "normalize_ok": true,
         "broken_link_count": 0,
@@ -279,12 +299,20 @@ report は以下の形を目標にする。
     "repair_plan": [
         {
             "kind": "broken_origin_slot",
-            "action": "run_repair_links",
+            "action": "repair-links",
             "confidence": "high",
+            "next_action": {
+                "tool": "repair-links",
+                "safe_to_run": true,
+                "writes_files": false,
+                "requires_user_approval": false,
+            },
         }
     ],
 }
 ```
+
+`diagnose-load` の出力は人間向け文章ではなく agent handoff artifact とする。`summary` と `repair_plan[].next_action` を上位に置き、agent が次の安全な操作を機械的に選べる形を優先する。説明文は補助であり、判断材料は `status`, `primary_issue`, `confidence`, `next_action`, `evidence` に寄せる。
 
 修正候補は段階を分ける。
 

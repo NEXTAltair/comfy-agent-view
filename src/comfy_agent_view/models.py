@@ -163,17 +163,36 @@ class RuntimeLogsDiagnostics(BaseModel):
     matched_errors: list[RuntimeDiagnosticEvent] = Field(default_factory=list)
 
 
+class RuntimeAction(BaseModel):
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    command: list[str] = Field(default_factory=list)
+    safe_to_run: bool
+    writes_files: bool
+    requires_user_approval: bool
+
+
+class RuntimeSummary(BaseModel):
+    status: Literal["ok", "needs_repair", "needs_setup", "inconclusive"]
+    primary_issue: str | None = None
+    confidence: str = "low"
+    next_action: RuntimeAction | None = None
+
+
 class RuntimeRepairPlanItem(BaseModel):
     kind: str
     action: str
     confidence: str
-    message: str
+    next_action: RuntimeAction
+    message: str | None = None
 
 
 class RuntimeLoadDiagnosticResult(BaseModel):
     format: Literal["comfy_runtime_diagnostic_v1"] = "comfy_runtime_diagnostic_v1"
+    summary: RuntimeSummary
     workflow: str
     source: SourceInfo
+    evidence: list[RuntimeDiagnosticEvent] = Field(default_factory=list)
     static: RuntimeStaticDiagnostics
     object_info: RuntimeObjectInfoDiagnostics
     logs: RuntimeLogsDiagnostics

@@ -272,6 +272,9 @@ def test_diagnose_load_reads_comfyui_logs_and_ranks_errors(tmp_path, monkeypatch
     assert result.format == "comfy_runtime_diagnostic_v1"
     assert result.logs.file_status[0].exists is True
     assert result.logs.file_status[0].readable is True
+    assert result.summary.status == "needs_setup"
+    assert result.summary.primary_issue == "object_info_stale"
+    assert result.evidence[0].category == "custom_node_import_error"
     assert result.logs.matched_errors[0].category == "custom_node_import_error"
     assert "[PATH:node.py]" in result.logs.matched_errors[0].message
     assert result.logs.noise_counts["deprecated_api"] == 1
@@ -296,9 +299,15 @@ beforeRegisterNodeDef/nodeType.prototype.onConnectionsChange@http://127.0.0.1:81
     result = diagnose_load(str(path), comfyui_user_dir=str(tmp_path), error_report_text=report)
 
     assert result.static.broken_link_count == 1
+    assert result.summary.status == "needs_repair"
+    assert result.summary.next_action is not None
+    assert result.summary.next_action.tool == "repair-links"
+    assert result.summary.next_action.safe_to_run is True
+    assert result.summary.next_action.writes_files is False
     assert result.frontend_error["present"] is True
     assert result.frontend_error["extension"] == "ComfyUI-Impact-Pack"
-    assert result.repair_plan[0].action == "run_repair_links"
+    assert result.repair_plan[0].action == "repair-links"
+    assert result.repair_plan[0].next_action.requires_user_approval is False
     assert result.optional_inputs["error_report_text"] == "not_required"
 
 

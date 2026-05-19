@@ -21,10 +21,12 @@ from .models import (
     PromptPresence,
     RepairResult,
     RuntimeDiagnosticEvent,
+    RuntimeAction,
     RuntimeLoadDiagnosticResult,
     RuntimeLogsDiagnostics,
     RuntimeObjectInfoDiagnostics,
     RuntimeRepairPlanItem,
+    RuntimeSummary,
     RuntimeStaticDiagnostics,
     SourceInfo,
     SummaryResult,
@@ -278,7 +280,8 @@ def diagnose_load(
     matched_errors = ranked_events[:LOG_MAX_EVENTS]
     noise_counts = Counter(event.category for event in events if event.category in {"startup_info", "deprecated_api", "manager_cache_warning"})
     frontend = _frontend_error_summary(events, bool(error_report_text))
-    repair_plan = _runtime_repair_plan(repair, object_info, matched_errors)
+    repair_plan = _runtime_repair_plan(source_path, repair, object_info, matched_errors)
+    summary = _runtime_summary(repair_plan, matched_errors)
 
     if not error_report_text and not matched_errors and not repair.broken_links:
         optional_state = "helpful_if_frontend_only_error_persists"
@@ -286,8 +289,10 @@ def diagnose_load(
         optional_state = "not_required"
 
     return RuntimeLoadDiagnosticResult(
+        summary=summary,
         workflow=str(source_path),
         source=SourceInfo(path=str(source_path), name=source_path.name),
+        evidence=matched_errors[:10],
         static=RuntimeStaticDiagnostics(
             normalize_ok=not any(warning.level == "error" for warning in normalized.warnings),
             broken_link_count=len(repair.broken_links),
@@ -507,7 +512,19 @@ def _rank_events(events: list[RuntimeDiagnosticEvent], workflow_terms: set[str])
     ranked = sorted(events, key=lambda event: _event_score(event, workflow_terms), reverse=True)
     for event in ranked:
         event.confidence = _event_confidence(event, workflow_terms)
-    return [event for event in ranked if event.severity in {"error", "warning"} and event.category != "startup_info"]
+    primary_categories = {
+        "broken_origin_slot",
+        "frontend_graph_load_error",
+        "custom_node_import_error",
+        "missing_custom_node",
+        "missing_python_module",
+        "model_resolution_warning",
+    }
+    return [
+        event
+        for event in ranked
+        if event.category in primary_categories or event.confidence != "low"
+    ]
 
 
 def _event_score(event: RuntimeDiagnosticEvent, workflow_terms: set[str]) -> tuple[int, int, int, int, int]:
@@ -579,7 +596,32 @@ def _frontend_error_summary(events: list[RuntimeDiagnosticEvent], provided: bool
     }
 
 
+def _runtime_summary(
+    repair_plan: list[RuntimeRepairPlanItem],
+    events: list[RuntimeDiagnosticEvent],
+) -> RuntimeSummary:
+    if repair_plan:
+        first = repair_plan[0]
+        status = "needs_repair" if first.kind == "broken_origin_slot" else "needs_setup"
+        return RuntimeSummary(
+            status=status,
+            primary_issue=first.kind,
+            confidence=first.confidence,
+            next_action=first.next_action,
+        )
+    if events:
+        event = events[0]
+        return RuntimeSummary(
+            status="inconclusive",
+            primary_issue=event.category,
+            confidence=event.confidence,
+            next_action=None,
+        )
+    return RuntimeSummary(status="ok", primary_issue=None, confidence="high", next_action=None)
+
+
 def _runtime_repair_plan(
+    source_path: Path,
     repair: RepairResult,
     object_info: RuntimeObjectInfoDiagnostics,
     events: list[RuntimeDiagnosticEvent],
@@ -589,27 +631,51 @@ def _runtime_repair_plan(
         plan.append(
             RuntimeRepairPlanItem(
                 kind="broken_origin_slot",
-                action="run_repair_links",
+                action="repair-links",
                 confidence="high" if repair.broken_links else "medium",
-                message="Run repair-links dry-run and inspect broken origin slot warnings.",
+                next_action=RuntimeAction(
+                    tool="repair-links",
+                    args={"path": str(source_path), "dry_run": True},
+                    command=["comfy-agent-view", "repair-links", str(source_path), "--dry-run"],
+                    safe_to_run=True,
+                    writes_files=False,
+                    requires_user_approval=False,
+                ),
             )
         )
-    if object_info.stale:
+    should_refresh_object_info = object_info.stale and not (
+        object_info.exists and object_info.valid and object_info.stale_reason == "metadata_missing"
+    )
+    if should_refresh_object_info:
         plan.append(
             RuntimeRepairPlanItem(
                 kind="object_info_stale",
-                action="fetch_object_info",
+                action="fetch-object-info",
                 confidence="medium",
-                message="Refresh the cached /object_info before diagnosing custom nodes.",
+                next_action=RuntimeAction(
+                    tool="fetch-object-info",
+                    args={},
+                    command=["comfy-agent-view", "fetch-object-info"],
+                    safe_to_run=True,
+                    writes_files=True,
+                    requires_user_approval=False,
+                ),
             )
         )
     if object_info.missing_node_types:
         plan.append(
             RuntimeRepairPlanItem(
                 kind="missing_custom_node",
-                action="inspect_custom_node_install",
+                action="inspect-custom-node-install",
                 confidence="medium",
-                message=f"Missing node types in object_info: {', '.join(object_info.missing_node_types[:10])}.",
+                next_action=RuntimeAction(
+                    tool="inspect-custom-node-install",
+                    args={"node_types": object_info.missing_node_types[:10]},
+                    command=[],
+                    safe_to_run=False,
+                    writes_files=False,
+                    requires_user_approval=True,
+                ),
             )
         )
     return plan
@@ -617,6 +683,8 @@ def _runtime_repair_plan(
 
 def _severity(message: str) -> str:
     lower = message.lower()
+    if lower.startswith("found comfy_kitchen backend"):
+        return "info"
     if any(token in message for token in ("ERROR", "Exception", "Traceback", "Cannot import", "ModuleNotFoundError", "ImportError")):
         return "error"
     if "warning" in lower or "not installed" in lower or "outdated cache" in lower:
@@ -628,6 +696,8 @@ def _severity(message: str) -> str:
 
 def _category(message: str) -> str:
     lower = message.lower()
+    if lower.startswith("found comfy_kitchen backend"):
+        return "startup_info"
     if "node.outputs" in lower and "origin_slot" in lower and "undefined" in lower:
         return "broken_origin_slot"
     if "modulenotfounderror" in lower:
