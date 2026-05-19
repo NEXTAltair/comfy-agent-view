@@ -17,7 +17,8 @@ uv pip install -e '.[dev]'
 主なコマンド:
 
 ```bash
-comfy-agent-view list /path/to/workflows
+comfy-agent-view list
+comfy-agent-view list /path/to/other/workflows
 comfy-agent-view summarize /path/to/workflow.json --profile safe
 comfy-agent-view normalize /path/to/workflow.json --profile debug
 comfy-agent-view repair-links /path/to/workflow.json --dry-run
@@ -31,6 +32,10 @@ uv pip install -e '.[mcp]'
 ```
 
 読み取り範囲は ComfyUI の `user` ディレクトリ配下に限定する。恒久設定は user config に書き、CLI の `--comfyui-user-dir` は一時実行やデバッグだけに使う。
+
+`list` の root を省略した場合は `<comfyui_user_dir>/default/workflows` を見る。ComfyUI の通常 workflow 保存先は `user/default/workflows` なので、設定項目は user ディレクトリのままにして、workflow 操作時だけ既定パスを足す。
+
+そのディレクトリが symlink / junction の場合はリンク先を workflow root として扱う。Stability Matrix ではこの形になることがある。
 
 user config の場所は次で確認できる。
 

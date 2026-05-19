@@ -5,7 +5,7 @@ import json
 import pytest
 
 from comfy_agent_view.config import config_path
-from comfy_agent_view.core import normalize_workflow, repair_broken_links, summarize_workflow
+from comfy_agent_view.core import list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
 
 
 def _workflow(path):
@@ -66,6 +66,33 @@ def test_summarize_returns_structured_counts(tmp_path):
     assert result.stats["node_count"] == 5
     assert result.stats["link_count"] == 3
     assert result.kind["has_lora"] is False
+
+
+def test_list_workflows_defaults_to_comfyui_default_workflow_dir(tmp_path):
+    workflow_dir = tmp_path / "default" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    _workflow(workflow_dir / "wf.json")
+    _workflow(tmp_path / "root_noise.json")
+
+    result = list_workflows(comfyui_user_dir=str(tmp_path))
+
+    assert result.root == str(workflow_dir.resolve())
+    assert [item.name for item in result.workflows] == ["wf.json"]
+
+
+def test_default_workflow_dir_may_be_symlink_target_outside_user_dir(tmp_path):
+    user_dir = tmp_path / "user"
+    default_dir = user_dir / "default"
+    target_dir = tmp_path / "Workflows"
+    default_dir.mkdir(parents=True)
+    target_dir.mkdir()
+    (default_dir / "workflows").symlink_to(target_dir, target_is_directory=True)
+    _workflow(target_dir / "wf.json")
+
+    result = list_workflows(comfyui_user_dir=str(user_dir))
+
+    assert result.root == str(target_dir.resolve())
+    assert [item.name for item in result.workflows] == ["wf.json"]
 
 
 def test_repair_detects_bad_origin_slot(tmp_path):

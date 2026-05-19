@@ -64,7 +64,8 @@ def list_workflows(
     limit: int = 100,
     comfyui_user_dir: str | None = None,
 ) -> WorkflowListResult:
-    root_path = _resolve_allowed_path(root or _comfyui_user_dir(comfyui_user_dir), comfyui_user_dir=comfyui_user_dir)
+    default_root = str(_default_workflow_dir(comfyui_user_dir)) if root is None else root
+    root_path = _resolve_allowed_path(default_root, comfyui_user_dir=comfyui_user_dir)
     warnings: list[WarningItem] = []
     if not root_path.exists():
         return WorkflowListResult(
@@ -266,10 +267,10 @@ def _load_json_path(path: str, comfyui_user_dir: str | None = None) -> tuple[dic
 
 def _resolve_allowed_path(path: str, for_write: bool = False, comfyui_user_dir: str | None = None) -> Path:
     resolved = Path(path).expanduser().resolve()
-    root = Path(_comfyui_user_dir(comfyui_user_dir)).expanduser().resolve()
-    if not _is_relative_to(resolved, root):
+    roots = _allowed_roots(comfyui_user_dir)
+    if not any(_is_relative_to(resolved, root) for root in roots):
         raise PermissionError(f"Path is outside comfyui_user_dir: {resolved}")
-    if for_write and not _is_relative_to(resolved.parent, root):
+    if for_write and not any(_is_relative_to(resolved.parent, root) for root in roots):
         raise PermissionError(f"Output path is outside comfyui_user_dir: {resolved}")
     return resolved
 
@@ -281,6 +282,19 @@ def _comfyui_user_dir(override: str | None = None) -> str:
     if not configured:
         raise PermissionError("comfyui_user_dir is not configured.")
     return configured
+
+
+def _default_workflow_dir(comfyui_user_dir: str | None = None) -> Path:
+    return Path(_comfyui_user_dir(comfyui_user_dir)).expanduser().resolve() / "default" / "workflows"
+
+
+def _allowed_roots(comfyui_user_dir: str | None = None) -> list[Path]:
+    user_dir = Path(_comfyui_user_dir(comfyui_user_dir)).expanduser().resolve()
+    workflow_dir = (user_dir / "default" / "workflows").resolve()
+    roots = [user_dir]
+    if workflow_dir != user_dir and not _is_relative_to(workflow_dir, user_dir):
+        roots.append(workflow_dir)
+    return roots
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
