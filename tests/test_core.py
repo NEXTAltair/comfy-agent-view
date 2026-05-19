@@ -60,6 +60,33 @@ def test_normalize_redacts_prompt(tmp_path):
     assert "pos" not in result.nodes[0].model_dump()
 
 
+def test_normalize_collects_unet_and_clip_loaders(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["nodes"].extend(
+        [
+            {
+                "id": 6,
+                "type": "UNETLoader",
+                "widgets_values": ["anima-preview.safetensors", "default"],
+            },
+            {
+                "id": 7,
+                "type": "CLIPLoader",
+                "widgets_values": ["qwen_3_06b_base.safetensors", "stable_diffusion", "default"],
+            },
+        ]
+    )
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = normalize_workflow(str(path), profile="safe", comfyui_user_dir=str(tmp_path))
+
+    assert result.models["unet"] == [{"name": "anima-preview.safetensors", "weight_dtype": "default"}]
+    assert result.models["clip"] == [
+        {"name": "qwen_3_06b_base.safetensors", "type": "stable_diffusion", "device": "default"}
+    ]
+
+
 def test_summarize_returns_structured_counts(tmp_path):
     path = _workflow(tmp_path / "wf.json")
     result = summarize_workflow(str(path), comfyui_user_dir=str(tmp_path))

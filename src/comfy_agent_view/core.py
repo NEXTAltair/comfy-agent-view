@@ -34,6 +34,8 @@ UI_ONLY_NODE_FIELDS = {
 WIDGET_MAPS: dict[str, list[str]] = {
     "CheckpointLoaderSimple": ["ckpt_name"],
     "VAELoader": ["vae_name"],
+    "UNETLoader": ["unet_name", "weight_dtype"],
+    "CLIPLoader": ["clip_name", "type", "device"],
     "LoraLoader": ["lora_name", "strength_model", "strength_clip"],
     "CLIPTextEncode": ["text"],
     "EmptyLatentImage": ["width", "height", "batch_size"],
@@ -54,7 +56,7 @@ WIDGET_MAPS: dict[str, list[str]] = {
     "ControlNetLoader": ["control_net_name"],
 }
 
-PRIVATE_MODEL_KEYS = {"checkpoints", "loras", "vae", "controlnet"}
+PRIVATE_MODEL_KEYS = {"checkpoints", "loras", "vae", "controlnet", "unet", "clip"}
 PRIVATE_INPUT_KEYS = {"filename_prefix", "image", "upload"}
 
 
@@ -511,6 +513,19 @@ def _collect_models(node_type: str, inputs: dict[str, Any], models: dict[str, An
         models["checkpoints"].append(_maybe_private(inputs["ckpt_name"], profile))
     elif node_type == "VAELoader" and inputs.get("vae_name"):
         models["vae"].append(_maybe_private(inputs["vae_name"], profile))
+    elif node_type == "UNETLoader" and inputs.get("unet_name"):
+        item = {
+            "name": _maybe_private(inputs.get("unet_name"), profile),
+            "weight_dtype": inputs.get("weight_dtype"),
+        }
+        models["unet"].append(item)
+    elif node_type == "CLIPLoader" and inputs.get("clip_name"):
+        item = {
+            "name": _maybe_private(inputs.get("clip_name"), profile),
+            "type": inputs.get("type"),
+            "device": inputs.get("device"),
+        }
+        models["clip"].append(item)
     elif node_type == "LoraLoader" and inputs.get("lora_name"):
         item = {
             "name": _maybe_private(inputs.get("lora_name"), profile),
@@ -587,7 +602,7 @@ def _token_estimate(text: str) -> int:
 
 
 def _empty_models() -> dict[str, Any]:
-    return {"checkpoints": [], "loras": [], "vae": [], "controlnet": []}
+    return {"checkpoints": [], "loras": [], "vae": [], "controlnet": [], "unet": [], "clip": []}
 
 
 def _maybe_private(value: Any, profile: Profile) -> Any:
@@ -618,6 +633,8 @@ def _family_guess(models: dict[str, Any]) -> str | None:
         return "flux"
     if "pony" in lower:
         return "pony"
+    if "qwen" in lower:
+        return "qwen"
     if "sd15" in lower or "1.5" in lower:
         return "sd15"
     return None
