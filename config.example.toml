@@ -1,0 +1,6 @@
+[comfy_agent_view]
+# ComfyUI user directory. All workflow reads and repair output paths must stay under this directory.
+comfyui_user_dir = "H:\\StabilityMatrix-win-x64\\Data\\Packages\\ComfyUI\\user"
+
+default_profile = "safe"
+allow_full_profile = true

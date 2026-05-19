@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# comfy-agent-view local config
+config.toml
+
 # Spyder project settings
 .spyderproject
 .spyproject

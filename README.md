@@ -47,6 +47,8 @@ default_profile = "safe"
 allow_full_profile = true
 ```
 
+同じ内容のテンプレートは `config.example.toml` にある。実際の `config.toml` はローカル設定なので追跡しない。
+
 設定がない状態で workflow path を読むとエラーになる。推測で任意パスを読む fallback は持たない。
 
 ## Interfaces
