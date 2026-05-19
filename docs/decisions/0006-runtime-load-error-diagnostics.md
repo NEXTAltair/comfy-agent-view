@@ -104,9 +104,11 @@ timestamp がない継続行は直前 event にぶら下げる。ANSI color code
     "category": "missing_custom_node",
     "source": "ComfyUI-Manager",
     "node_type": "SomeCaptionNode",
+    "package": "some-custom-node",
     "exception_type": "ImportError",
     "message": "Cannot import ...",
     "fingerprint": "sha256:...",
+    "count": 1,
 }
 ```
 
@@ -131,11 +133,14 @@ pasted Error Report text 由来の event は以下の形を許す。
 
 severity は `debug | info | warning | error` に正規化する。文字列に `ERROR`, `Exception`, `Traceback`, `Cannot import`, `ModuleNotFoundError`, `ImportError` が含まれる場合は原則 `error` とする。`Warning`, `DEPRECATION WARNING`, `not installed`, `outdated cache` は `warning` とする。
 
+同じ `category`, `source`, `node_type`, `package`, `exception_type`, redacted `message` を持つ event は同じ `fingerprint` に集約し、`count` と最初/最後の出現位置を持たせる。report は重複行を並べず、同じ原因を1件の event として扱う。
+
 category はまず以下に寄せる。
 
 - `missing_custom_node`
 - `custom_node_import_error`
 - `missing_python_module`
+- `missing_optional_dependency`
 - `broken_origin_slot`
 - `frontend_graph_load_error`
 - `frontend_extension_error`
@@ -149,6 +154,26 @@ category はまず以下に寄せる。
 redactor は raw path / prompt / long value をそのまま返さない。Windows / POSIX path は basename または path kind に丸める。workflow file name、node type、exception type、custom node package nameは診断に必要なので残す。
 
 frontend stack trace の URL は origin と hashed asset path を落とし、extension 名、asset basename、function 名だけを保持する。`http://127.0.0.1:8188/extensions/ComfyUI-Impact-Pack/impact-pack.js:399:6` は `extension=ComfyUI-Impact-Pack`, `asset=impact-pack.js`, `line=399` のように正規化する。
+
+分類ルールは deterministic な substring / regex matching を優先する。初期実装では以下を固定順に評価する。
+
+1. `node.outputs[...origin_slot] is undefined` または同等表現: `broken_origin_slot` + `frontend_graph_load_error`
+2. `ModuleNotFoundError`: `missing_python_module`
+3. `ImportError`, `Cannot import`, `Failed to import custom node`: `custom_node_import_error`
+4. `not installed`: `missing_optional_dependency`
+5. `DEPRECATION WARNING`, `deprecated legacy API`: `deprecated_api`
+6. model / checkpoint / lora / vae の解決失敗: `model_resolution_warning`
+7. ComfyUI-Manager cache / registry warning: `manager_cache_warning`
+8. startup banner / version / path / device info: `startup_info`
+9. それ以外: `unknown`
+
+照合ルールは次の順で行う。
+
+1. workflow 内 node type を `/object_info` cache と照合し、存在しない node type を `object_info.missing_node_types` に出す。
+2. workflow links の origin / target slot を node definition と照合し、存在しない output slot / input slot を structural warning にする。
+3. log event の `node_type`, `package`, `source`, `extension` を workflow の node type / known package name と照合する。一致した event は `confidence` を上げる。
+4. frontend stack trace に node id / node type がない場合は、workflow 全体の broken link / slot 検査を優先し、候補 node を複数返す。
+5. object_info cache がない、または cache timestamp が古い場合は、診断結果に `fetch-object-info` を推奨する。ただし診断中に network fetch は自動実行しない。
 
 report は以下の形を目標にする。
 
