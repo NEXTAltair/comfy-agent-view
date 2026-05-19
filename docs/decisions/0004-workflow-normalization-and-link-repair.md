@@ -49,11 +49,13 @@ ComfyUI 更新や custom node 更新により、昔の workflow が `origin_slot
 `widgets_values` 展開は段階的に行う。
 
 1. `widgets_values` が dict ならそのまま使う
-2. 既定キャッシュ `object_info.json` があれば、node type ごとの input schema から widget 名を復元する
-3. cache に該当 node type がなければ、主要ノードの静的 mapping を fallback にする
+2. 主要ノードは、既知の UI widget 順を静的 mapping で復元する
+3. 静的 mapping に該当 node type がなければ、既定キャッシュ `object_info.json` の input schema から widget 名を復元する
 4. それでも展開できない場合は `debug` profile の `unknown_widgets` に残す
 
 ComfyUI の `/object_info` は固定ファイルではなく起動中 API なので、CLI の `fetch-object-info` で tool 側の既定保存先へ明示的に cache する。正規化時に毎回 ComfyUI へ問い合わせることはしない。
+
+`/object_info` の input schema 順は、必ずしも workflow JSON の `widgets_values` 順と一致しない。既知ノードでは `widgets_values` の UI 保存順を優先し、custom node / 未知 node の補助情報として `/object_info` を使う。
 
 MVP で優先するノード:
 

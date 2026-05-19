@@ -9,6 +9,7 @@
 | [0003](0003-profile-redaction-policy.md) | Profile Redaction Policy | 2026-05-19 | Accepted |
 | [0004](0004-workflow-normalization-and-link-repair.md) | Workflow Normalization and Link Repair | 2026-05-19 | Accepted |
 | [0005](0005-path-security-and-runtime-boundaries.md) | Path Security and Runtime Boundaries | 2026-05-19 | Accepted |
+| [0006](0006-runtime-load-error-diagnostics.md) | Runtime Load Error Diagnostics | 2026-05-19 | Accepted |
 
 ## ADR テンプレート
 
