@@ -338,7 +338,7 @@ def test_apply_workflow_patch_deletes_unlinked_node(tmp_path):
     assert all(node["id"] != 99 for node in fixed["nodes"])
 
 
-def test_apply_workflow_patch_refuses_deleting_linked_node(tmp_path):
+def test_apply_workflow_patch_deletes_node_with_attached_links(tmp_path):
     path = _workflow(tmp_path / "wf.json")
     output_path = tmp_path / "wf.fixed.json"
     patch_path = tmp_path / "patch.json"
@@ -353,8 +353,13 @@ def test_apply_workflow_patch_refuses_deleting_linked_node(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="still has link references"):
-        apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+    result = apply_workflow_patch(str(patch_path), dry_run=False, comfyui_user_dir=str(tmp_path))
+    fixed = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert all(node["id"] != 1 for node in fixed["nodes"])
+    assert all(link[1] != 1 and link[3] != 1 for link in fixed["links"])
+    assert fixed["nodes"][0]["inputs"][0]["link"] is None
 
 
 def test_apply_workflow_patch_retargets_input_link(tmp_path):
