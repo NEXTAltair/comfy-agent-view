@@ -1297,10 +1297,11 @@ def _detect_broken_link_warnings(links: list[dict[str, Any]], node_by_id: dict[A
 def _detect_broken_links(links: list[dict[str, Any]], node_by_id: dict[Any, dict[str, Any]]) -> list[BrokenLink]:
     broken = []
     for link in links:
+        if node_by_id.get(link.get("target_id")) is None:
+            continue
         origin = node_by_id.get(link.get("origin_id"))
         origin_slot = link.get("origin_slot")
         if origin is None:
-            broken.append(_broken(link, "origin node is missing"))
             continue
         outputs = origin.get("outputs")
         if not isinstance(outputs, list):
@@ -1308,10 +1309,6 @@ def _detect_broken_links(links: list[dict[str, Any]], node_by_id: dict[Any, dict
             continue
         if not isinstance(origin_slot, int) or origin_slot < 0 or origin_slot >= len(outputs):
             broken.append(_broken(link, f"origin_slot out of range; node has {len(outputs)} outputs"))
-            continue
-        target = node_by_id.get(link.get("target_id"))
-        if target is None:
-            broken.append(_broken(link, "target node is missing"))
     return broken
 
 

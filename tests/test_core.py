@@ -362,6 +362,18 @@ def test_apply_workflow_patch_deletes_node_with_attached_links(tmp_path):
     assert fixed["nodes"][0]["inputs"][0]["link"] is None
 
 
+def test_diagnose_load_ignores_dangling_links_to_deleted_nodes(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["links"].append([99, 1, 9, 999, 0, "MODEL"])
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = diagnose_load(str(path), comfyui_user_dir=str(tmp_path))
+
+    assert result.static.broken_link_count == 0
+    assert result.summary.status == "ok"
+
+
 def test_apply_workflow_patch_retargets_input_link(tmp_path):
     path = _workflow(tmp_path / "wf.json")
     patch_path = tmp_path / "patch.json"
