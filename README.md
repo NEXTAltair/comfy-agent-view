@@ -22,6 +22,7 @@ comfy-agent-view list /path/to/other/workflows
 comfy-agent-view summarize /path/to/workflow.json --profile safe
 comfy-agent-view normalize /path/to/workflow.json --profile debug
 comfy-agent-view repair-links /path/to/workflow.json --dry-run
+comfy-agent-view fetch-object-info --comfy-url http://127.0.0.1:8188
 comfy-agent-view mcp
 ```
 
@@ -42,6 +43,15 @@ user config の場所は次で確認できる。
 ```bash
 comfy-agent-view --print-config-path
 ```
+
+ComfyUI の `/object_info` は固定ファイルではなく起動中 API から得る。custom node の `widgets_values` を名前付き input に戻したい場合は、ComfyUI 起動中に一度キャッシュする。
+
+```bash
+comfy-agent-view fetch-object-info --comfy-url http://127.0.0.1:8188
+comfy-agent-view --print-object-info-path
+```
+
+既定保存先は user config と同じディレクトリの `object_info.json`。`normalize` / `summarize` はこの既定キャッシュがあれば自動で参照し、なければ静的 fallback を使う。
 
 設定例:
 
@@ -68,6 +78,7 @@ MVPで公開する MCP tools:
 - `comfy_workflow_summarize`
 - `comfy_workflow_normalize`
 - `comfy_workflow_repair_links`
+- `comfy_object_info_fetch`
 
 ## Design Records
 

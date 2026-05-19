@@ -39,6 +39,10 @@ def config_path() -> Path:
     return _config_path()
 
 
+def object_info_cache_path() -> Path:
+    return _config_path().with_name("object_info.json")
+
+
 def _config_path() -> Path:
     override = os.environ.get("COMFY_AGENT_VIEW_CONFIG", "").strip()
     if override:

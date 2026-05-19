@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .core import list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from .core import fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
 
 
 def run() -> None:
@@ -40,5 +40,10 @@ def run() -> None:
     def comfy_workflow_repair_links(path: str, dry_run: bool = True, output_path: str | None = None) -> dict:
         """Detect and optionally repair broken ComfyUI workflow links."""
         return repair_broken_links(path=path, dry_run=dry_run, output_path=output_path).model_dump(mode="json")
+
+    @mcp.tool()
+    def comfy_object_info_fetch(comfy_url: str = "http://127.0.0.1:8188") -> dict:
+        """Fetch ComfyUI /object_info and save it to the default local cache."""
+        return fetch_object_info(comfy_url=comfy_url).model_dump(mode="json")
 
     mcp.run()

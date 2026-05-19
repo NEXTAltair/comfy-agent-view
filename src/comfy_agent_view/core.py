@@ -4,12 +4,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import urlopen
 
-from .config import load_config
+from .config import load_config, object_info_cache_path
 from .models import (
     BrokenLink,
     NormalizeResult,
     NormalizedNode,
+    ObjectInfoFetchResult,
     Profile,
     PromptPresence,
     RepairResult,
@@ -109,7 +112,7 @@ def summarize_workflow(
     detail: str = "compact",
     comfyui_user_dir: str | None = None,
 ) -> SummaryResult:
-    normalized = normalize_workflow(path=path, profile=profile, use_object_info="never", comfyui_user_dir=comfyui_user_dir)
+    normalized = normalize_workflow(path=path, profile=profile, use_object_info="auto", comfyui_user_dir=comfyui_user_dir)
     stats = {
         "node_count": len(normalized.nodes),
         "link_count": _count_links(_load_json_path(path, comfyui_user_dir=comfyui_user_dir)[0]),
@@ -147,21 +150,21 @@ def normalize_workflow(
     links = _extract_links(data)
     link_by_id = {link["id"]: link for link in links if link.get("id") is not None}
     warnings = _detect_broken_link_warnings(links, node_by_id)
-
-    if use_object_info == "require":
+    object_info = _load_object_info(use_object_info, warnings)
+    if use_object_info == "require" and object_info is None:
         warnings.append(
             WarningItem(
                 level="error",
-                code="OBJECT_INFO_UNIMPLEMENTED",
-                message="/object_info mapping is not implemented in this MVP. Use use_object_info='never' or 'auto'.",
+                code="OBJECT_INFO_CACHE_MISSING",
+                message=f"object_info cache does not exist: {object_info_cache_path()}",
             )
         )
-    elif comfy_url and use_object_info == "auto":
+    elif comfy_url and use_object_info == "auto" and object_info is None:
         warnings.append(
             WarningItem(
                 level="info",
-                code="OBJECT_INFO_SKIPPED",
-                message="/object_info lookup is reserved for a later phase; static workflow mapping was used.",
+                code="OBJECT_INFO_CACHE_MISSING",
+                message=f"Run fetch-object-info to cache {comfy_url.rstrip('/')}/object_info before normalizing custom nodes.",
             )
         )
 
@@ -172,7 +175,7 @@ def normalize_workflow(
 
     for raw in nodes_raw:
         node_type = str(raw.get("type") or "Unknown")
-        widgets = _widgets_as_dict(node_type, raw.get("widgets_values"))
+        widgets = _widgets_as_dict(node_type, raw.get("widgets_values"), object_info=object_info)
         inputs = _normalize_inputs(raw, widgets, link_by_id, node_by_id, warnings)
         inputs = _profile_inputs(inputs, profile)
         _collect_models(node_type, inputs, models, profile)
@@ -209,6 +212,27 @@ def normalize_workflow(
         generation=generation,
         prompts=prompts,
         warnings=warnings,
+    )
+
+
+def fetch_object_info(comfy_url: str = "http://127.0.0.1:8188") -> ObjectInfoFetchResult:
+    url = f"{comfy_url.rstrip('/')}/object_info"
+    try:
+        with urlopen(url, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError(f"Failed to fetch {url}: {error}") from error
+    if not isinstance(data, dict):
+        raise ValueError("/object_info response must be a JSON object.")
+    path = object_info_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return ObjectInfoFetchResult(
+        ok=True,
+        source_url=url,
+        path=str(path),
+        node_count=len(data),
+        message=f"Cached {len(data)} node definitions.",
     )
 
 
@@ -333,13 +357,61 @@ def _extract_links(data: dict[str, Any]) -> list[dict[str, Any]]:
     return parsed
 
 
-def _widgets_as_dict(node_type: str, values: Any) -> dict[str, Any]:
+def _load_object_info(use_object_info: UseObjectInfo, warnings: list[WarningItem]) -> dict[str, Any] | None:
+    if use_object_info == "never":
+        return None
+    path = object_info_cache_path()
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        warnings.append(
+            WarningItem(level="error", code="OBJECT_INFO_CACHE_INVALID", message=f"Failed to read object_info cache: {error}")
+        )
+        return None
+    if not isinstance(data, dict):
+        warnings.append(WarningItem(level="error", code="OBJECT_INFO_CACHE_INVALID", message="object_info cache root must be an object."))
+        return None
+    return data
+
+
+def _widgets_as_dict(node_type: str, values: Any, object_info: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(values, dict):
         return values
     if not isinstance(values, list):
         return {}
-    names = WIDGET_MAPS.get(node_type, [])
+    names = _object_info_widget_names(node_type, object_info) or WIDGET_MAPS.get(node_type, [])
     return {name: values[index] for index, name in enumerate(names) if index < len(values)}
+
+
+def _object_info_widget_names(node_type: str, object_info: dict[str, Any] | None) -> list[str]:
+    if not object_info:
+        return []
+    node_info = object_info.get(node_type)
+    if not isinstance(node_info, dict):
+        return []
+    inputs = node_info.get("input")
+    if not isinstance(inputs, dict):
+        return []
+    names: list[str] = []
+    for section_name in ("required", "optional"):
+        section = inputs.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for name, spec in section.items():
+            if _object_info_force_input(spec):
+                continue
+            names.append(str(name))
+    return names
+
+
+def _object_info_force_input(spec: Any) -> bool:
+    if not isinstance(spec, (list, tuple)) or len(spec) < 2:
+        return False
+    options = spec[1]
+    return isinstance(options, dict) and bool(options.get("forceInput"))
 
 
 def _normalize_inputs(

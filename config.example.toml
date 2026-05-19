@@ -4,3 +4,7 @@ comfyui_user_dir = "H:\\StabilityMatrix-win-x64\\Data\\Packages\\ComfyUI\\user"
 
 default_profile = "safe"
 allow_full_profile = true
+
+# object_info cache is written by:
+# comfy-agent-view fetch-object-info --comfy-url http://127.0.0.1:8188
+# Default cache path is next to this user config as object_info.json.

@@ -78,6 +78,15 @@ class NormalizeResult(BaseModel):
     warnings: list[WarningItem] = Field(default_factory=list)
 
 
+class ObjectInfoFetchResult(BaseModel):
+    format: Literal["comfy_object_info_cache_v1"] = "comfy_object_info_cache_v1"
+    ok: bool
+    source_url: str
+    path: str
+    node_count: int
+    message: str
+
+
 class BrokenLink(BaseModel):
     link_id: int | str
     origin_id: int | str | None = None

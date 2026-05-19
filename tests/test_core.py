@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from comfy_agent_view.config import config_path
-from comfy_agent_view.core import list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from comfy_agent_view.config import config_path, object_info_cache_path
+from comfy_agent_view.core import fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
 
 
 def _workflow(path):
@@ -85,6 +85,72 @@ def test_normalize_collects_unet_and_clip_loaders(tmp_path):
     assert result.models["clip"] == [
         {"name": "qwen_3_06b_base.safetensors", "type": "stable_diffusion", "device": "default"}
     ]
+
+
+def test_normalize_uses_default_object_info_cache_for_widgets(tmp_path, monkeypatch):
+    config_file = tmp_path / "config" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COMFY_AGENT_VIEW_CONFIG", str(config_file))
+    object_info_cache_path().write_text(
+        json.dumps(
+            {
+                "CustomModelLoader": {
+                    "input": {
+                        "required": {
+                            "model_name": ["COMBO", {}],
+                            "weight_dtype": ["COMBO", {}],
+                            "linked_model": ["MODEL", {"forceInput": True}],
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["nodes"] = [
+        {
+            "id": 99,
+            "type": "CustomModelLoader",
+            "widgets_values": ["custom.safetensors", "default"],
+        }
+    ]
+    data["links"] = []
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = normalize_workflow(str(path), profile="debug", comfyui_user_dir=str(tmp_path))
+
+    assert result.nodes[0].inputs["model_name"] == "custom.safetensors"
+    assert result.nodes[0].inputs["weight_dtype"] == "default"
+    assert result.nodes[0].unknown_widgets is None
+
+
+def test_fetch_object_info_writes_default_cache(tmp_path, monkeypatch):
+    config_file = tmp_path / "config" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COMFY_AGENT_VIEW_CONFIG", str(config_file))
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b'{"KSampler": {"input": {"required": {}}}}'
+
+    monkeypatch.setattr("comfy_agent_view.core.urlopen", lambda url, timeout: FakeResponse())
+
+    result = fetch_object_info("http://comfy.local:8188")
+
+    assert result.path == str(object_info_cache_path())
+    assert result.source_url == "http://comfy.local:8188/object_info"
+    assert result.node_count == 1
+    assert json.loads(object_info_cache_path().read_text(encoding="utf-8"))["KSampler"]
 
 
 def test_summarize_returns_structured_counts(tmp_path):

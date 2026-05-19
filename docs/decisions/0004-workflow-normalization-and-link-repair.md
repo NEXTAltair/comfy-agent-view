@@ -46,7 +46,14 @@ ComfyUI 更新や custom node 更新により、昔の workflow が `origin_slot
 }
 ```
 
-`widgets_values` 展開は段階的に行う。MVP では主要ノードを手動 mapping し、ComfyUI が起動している場合は `/object_info` を best-effort で参照する。取得できない場合は失敗にしない。
+`widgets_values` 展開は段階的に行う。
+
+1. `widgets_values` が dict ならそのまま使う
+2. 既定キャッシュ `object_info.json` があれば、node type ごとの input schema から widget 名を復元する
+3. cache に該当 node type がなければ、主要ノードの静的 mapping を fallback にする
+4. それでも展開できない場合は `debug` profile の `unknown_widgets` に残す
+
+ComfyUI の `/object_info` は固定ファイルではなく起動中 API なので、CLI の `fetch-object-info` で tool 側の既定保存先へ明示的に cache する。正規化時に毎回 ComfyUI へ問い合わせることはしない。
 
 MVP で優先するノード:
 
@@ -75,3 +82,4 @@ MVP で優先するノード:
 - `comfy_workflow_repair_links` は dry-run を既定にし、壊れた link / slot 参照の検出結果を返す。
 - 修復書き込みをする場合も、元ファイルを直接破壊せず output path を明示させる。
 - unknown widgets は原則 `debug` profile でのみ出す。
+- object_info cache が古い場合、custom node 更新後の widget 展開も古い schema に従う。必要に応じて `fetch-object-info` を再実行する。

@@ -5,8 +5,8 @@ import json
 import sys
 from typing import Any
 
-from .config import config_path
-from .core import list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from .config import config_path, object_info_cache_path
+from .core import fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -19,6 +19,11 @@ def main(argv: list[str] | None = None) -> None:
         "--print-config-path",
         action="store_true",
         help="Print the user config path and exit.",
+    )
+    parser.add_argument(
+        "--print-object-info-path",
+        action="store_true",
+        help="Print the default object_info cache path and exit.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -43,11 +48,17 @@ def main(argv: list[str] | None = None) -> None:
     repair_parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
     repair_parser.add_argument("--output-path")
 
+    object_info_parser = subparsers.add_parser("fetch-object-info")
+    object_info_parser.add_argument("--comfy-url", default="http://127.0.0.1:8188")
+
     subparsers.add_parser("mcp")
 
     args = parser.parse_args(argv)
     if args.print_config_path:
         sys.stdout.write(f"{config_path()}\n")
+        return
+    if args.print_object_info_path:
+        sys.stdout.write(f"{object_info_cache_path()}\n")
         return
     if args.command is None:
         parser.error("the following arguments are required: command")
@@ -90,6 +101,8 @@ def main(argv: list[str] | None = None) -> None:
                     comfyui_user_dir=args.comfyui_user_dir,
                 ).model_dump(mode="json")
             )
+        elif args.command == "fetch-object-info":
+            _print(fetch_object_info(comfy_url=args.comfy_url).model_dump(mode="json"))
         elif args.command == "mcp":
             from .mcp_server import run
 
