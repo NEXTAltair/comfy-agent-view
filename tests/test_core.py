@@ -9,8 +9,10 @@ from comfy_agent_view.core import (
     apply_workflow_patch,
     diagnose_load,
     fetch_object_info,
+    inspect_workflow_dependencies,
     list_workflows,
     normalize_workflow,
+    plan_workflow_patch,
     repair_broken_links,
     summarize_workflow,
 )
@@ -196,6 +198,51 @@ def test_fetch_object_info_writes_default_cache(tmp_path, monkeypatch):
     assert json.loads(object_info_cache_path().read_text(encoding="utf-8"))["KSampler"]
 
 
+def test_inspect_workflow_dependencies_groups_packages(tmp_path, monkeypatch):
+    config_file = tmp_path / "config" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("COMFY_AGENT_VIEW_CONFIG", str(config_file))
+    object_info_cache_path().write_text(
+        json.dumps(
+            {
+                "CheckpointLoaderSimple": {
+                    "category": "loaders",
+                    "name": "CheckpointLoaderSimple",
+                    "python_module": "nodes",
+                },
+                "CustomNode": {
+                    "category": "Example",
+                    "name": "CustomNode",
+                    "python_module": "custom_nodes.example-pack.nodes",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["nodes"].append(
+        {
+            "id": 6,
+            "type": "CustomNode",
+            "properties": {"cnr_id": "example-pack", "Node name for S&R": "CustomNode"},
+        }
+    )
+    data["nodes"].append({"id": 7, "type": "MissingNode", "properties": {"cnr_id": "missing-pack"}})
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = inspect_workflow_dependencies(str(path), comfyui_user_dir=str(tmp_path))
+    packages = {package.package: package for package in result.packages}
+
+    assert result.format == "comfy_workflow_dependencies_v1"
+    assert "MissingNode" in result.missing_node_types
+    assert packages["comfy-core"].node_count >= 1
+    assert packages["example-pack"].node_types == ["CustomNode"]
+    assert packages["missing-pack"].missing_node_types == ["MissingNode"]
+    assert any(node.type == "CustomNode" and node.package == "example-pack" for node in result.nodes)
+
+
 def test_summarize_returns_structured_counts(tmp_path):
     path = _workflow(tmp_path / "wf.json")
     result = summarize_workflow(str(path), comfyui_user_dir=str(tmp_path))
@@ -360,6 +407,38 @@ def test_apply_workflow_patch_deletes_node_with_attached_links(tmp_path):
     assert all(node["id"] != 1 for node in fixed["nodes"])
     assert all(link[1] != 1 and link[3] != 1 for link in fixed["links"])
     assert fixed["nodes"][0]["inputs"][0]["link"] is None
+
+
+def test_plan_workflow_patch_replaces_intconstant_and_deletes_notes(tmp_path):
+    path = _workflow(tmp_path / "wf.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["nodes"].extend(
+        [
+            {
+                "id": 29,
+                "type": "INTConstant",
+                "widgets_values": [7],
+                "inputs": [{"name": "value", "type": "INT", "link": None}],
+                "outputs": [{"name": "value", "type": "INT", "links": [66]}],
+                "properties": {"Node name for S&R": "INTConstant"},
+            },
+            {"id": 75, "type": "Note", "inputs": [], "outputs": [], "widgets_values": [""]},
+        ]
+    )
+    data["links"].append([66, 29, 0, 4, 0, "INT"])
+    path.write_text(json.dumps(data), encoding="utf-8")
+    output_path = tmp_path / "wf.fixed.json"
+    patch_path = tmp_path / "agent-patches" / "wf.patch.json"
+
+    plan = plan_workflow_patch(str(path), str(output_path), patch_path=str(patch_path), comfyui_user_dir=str(tmp_path))
+
+    assert plan.ok is True
+    assert plan.patch.output == str(output_path.resolve())
+    assert plan.written_path == str(patch_path.resolve())
+    assert json.loads(patch_path.read_text(encoding="utf-8"))["output"] == str(output_path.resolve())
+    assert {"set", "delete_node"} <= {operation.op for operation in plan.patch.operations}
+    assert any(operation.node_id == 29 and operation.path == ["type"] and operation.value == "PrimitiveInt" for operation in plan.patch.operations)
+    assert any(operation.node_id == 75 and operation.op == "delete_node" for operation in plan.patch.operations)
 
 
 def test_diagnose_load_ignores_dangling_links_to_deleted_nodes(tmp_path):

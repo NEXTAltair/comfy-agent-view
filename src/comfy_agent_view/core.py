@@ -18,7 +18,9 @@ from .models import (
     LogFileStatus,
     NormalizeResult,
     NormalizedNode,
+    NodeDependency,
     ObjectInfoFetchResult,
+    PackageDependency,
     Profile,
     PromptPresence,
     RepairResult,
@@ -37,6 +39,8 @@ from .models import (
     AppliedWorkflowPatchOperation,
     WorkflowListItem,
     WorkflowListResult,
+    WorkflowDependencyResult,
+    WorkflowPatchPlanResult,
     WorkflowPatchOperation,
     WorkflowPatchResult,
     WorkflowPatchSpec,
@@ -264,6 +268,80 @@ def fetch_object_info(comfy_url: str = "http://127.0.0.1:8188") -> ObjectInfoFet
         path=str(path),
         node_count=len(data),
         message=f"Cached {len(data)} node definitions.",
+    )
+
+
+def inspect_workflow_dependencies(
+    path: str,
+    use_object_info: UseObjectInfo = "auto",
+    comfyui_user_dir: str | None = None,
+) -> WorkflowDependencyResult:
+    data, source_path = _load_json_path(path, comfyui_user_dir=comfyui_user_dir)
+    warnings: list[WarningItem] = []
+    object_info = _load_object_info(use_object_info, warnings)
+    if use_object_info == "require" and object_info is None:
+        warnings.append(
+            WarningItem(
+                level="error",
+                code="OBJECT_INFO_CACHE_MISSING",
+                message=f"object_info cache does not exist: {object_info_cache_path()}",
+            )
+        )
+    object_info_diag = _object_info_diagnostics(data)
+    nodes: list[NodeDependency] = []
+    package_map: dict[str, dict[str, Any]] = {}
+
+    for raw in _extract_nodes(data):
+        node_type = str(raw.get("type") or "Unknown")
+        node_info = object_info.get(node_type) if isinstance(object_info, dict) else None
+        if not isinstance(node_info, dict):
+            node_info = None
+        package, package_source = _node_package(raw, node_info)
+        python_module = _string_or_none(node_info.get("python_module") if node_info else None)
+        category = _string_or_none(node_info.get("category") if node_info else None)
+        node_id = raw.get("id", len(nodes))
+        dependency = NodeDependency(
+            node_id=node_id,
+            type=node_type,
+            title=_node_title(raw),
+            package=package,
+            package_source=package_source,
+            python_module=python_module,
+            category=category,
+            present_in_object_info=node_info is not None,
+        )
+        nodes.append(dependency)
+
+        package_key = package or "unknown"
+        entry = package_map.setdefault(
+            package_key,
+            {"node_ids": [], "node_types": set(), "missing_node_types": set(), "sources": set()},
+        )
+        entry["node_ids"].append(node_id)
+        entry["node_types"].add(node_type)
+        entry["sources"].add(package_source)
+        if node_info is None:
+            entry["missing_node_types"].add(node_type)
+
+    packages = [
+        PackageDependency(
+            package=package,
+            node_count=len(info["node_ids"]),
+            node_types=sorted(info["node_types"]),
+            node_ids=info["node_ids"],
+            missing_node_types=sorted(info["missing_node_types"]),
+            sources=sorted(info["sources"]),
+        )
+        for package, info in sorted(package_map.items(), key=lambda item: (-len(item[1]["node_ids"]), item[0]))
+    ]
+
+    return WorkflowDependencyResult(
+        source=SourceInfo(path=str(source_path), name=source_path.name),
+        object_info=object_info_diag,
+        packages=packages,
+        nodes=nodes,
+        missing_node_types=object_info_diag.missing_node_types,
+        warnings=warnings,
     )
 
 
@@ -888,6 +966,68 @@ def apply_workflow_patch(
     )
 
 
+def plan_workflow_patch(
+    path: str,
+    output_path: str,
+    patch_path: str | None = None,
+    comfyui_user_dir: str | None = None,
+) -> WorkflowPatchPlanResult:
+    data, source_path = _load_json_path(path, comfyui_user_dir=comfyui_user_dir)
+    resolved_output = _resolve_allowed_path(output_path, for_write=True, comfyui_user_dir=comfyui_user_dir)
+    if source_path == resolved_output:
+        raise ValueError("Patch output must be different from source.")
+
+    nodes = _extract_nodes(data)
+    node_by_id = {node.get("id"): node for node in nodes}
+    operations: list[WorkflowPatchOperation] = []
+    warnings: list[WarningItem] = []
+
+    for item in _detect_broken_links(_extract_links(data), node_by_id):
+        operations.append(WorkflowPatchOperation(op="delete_link", link_id=item.link_id))
+
+    for node in nodes:
+        node_type = node.get("type")
+        node_id = node.get("id")
+        if node_id is None:
+            continue
+        if node_type == "INTConstant":
+            operations.extend(_primitive_int_replacement_operations(node))
+        elif node_type == "Note":
+            if _node_has_attached_links(data, node_id):
+                warnings.append(
+                    WarningItem(
+                        code="NOTE_NODE_HAS_LINKS",
+                        message=f"Note node {node_id} has attached links and was not auto-deleted.",
+                        node_id=_safe_int(node_id),
+                    )
+                )
+            else:
+                operations.append(WorkflowPatchOperation(op="delete_node", node_id=node_id))
+
+    patch = WorkflowPatchSpec(source=str(source_path), output=str(resolved_output), operations=operations)
+    written_path = None
+    if patch_path:
+        resolved_patch_path = _resolve_allowed_path(patch_path, for_write=True, comfyui_user_dir=comfyui_user_dir)
+        resolved_patch_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_patch_path.write_text(json.dumps(patch.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+        written_path = str(resolved_patch_path)
+
+    reason = "Generated patch operations for known safe workflow repairs."
+    if not operations:
+        reason = "No known safe workflow repair operations found."
+        warnings.append(WarningItem(code="NO_KNOWN_REPAIRS", message=reason))
+
+    return WorkflowPatchPlanResult(
+        ok=bool(operations),
+        source=SourceInfo(path=str(source_path), name=source_path.name),
+        output_path=str(resolved_output),
+        patch=patch,
+        written_path=written_path,
+        reason=reason,
+        warnings=warnings,
+    )
+
+
 def _apply_patch_operation(data: dict[str, Any], operation: WorkflowPatchOperation) -> AppliedWorkflowPatchOperation:
     if operation.op == "set":
         if operation.node_id is None or not operation.path:
@@ -955,6 +1095,70 @@ def _apply_patch_operation(data: dict[str, Any], operation: WorkflowPatchOperati
             message=f"Set node {operation.node_id} input {operation.input} to link {operation.link_id}; previous link was {previous_link}.",
         )
     raise ValueError(f"Unsupported operation: {operation.op}")
+
+
+def _primitive_int_replacement_operations(node: dict[str, Any]) -> list[WorkflowPatchOperation]:
+    node_id = node.get("id")
+    value = 0
+    widgets = node.get("widgets_values")
+    if isinstance(widgets, list) and widgets:
+        value = widgets[0]
+    links = _node_output_links(node)
+    return [
+        WorkflowPatchOperation(op="set", node_id=node_id, path=["type"], value="PrimitiveInt"),
+        WorkflowPatchOperation(op="set", node_id=node_id, path=["widgets_values"], value=[value]),
+        WorkflowPatchOperation(
+            op="set",
+            node_id=node_id,
+            path=["inputs"],
+            value=[
+                {
+                    "localized_name": "value",
+                    "name": "value",
+                    "type": "INT",
+                    "widget": {"name": "value"},
+                    "link": None,
+                }
+            ],
+        ),
+        WorkflowPatchOperation(
+            op="set",
+            node_id=node_id,
+            path=["outputs"],
+            value=[
+                {
+                    "localized_name": "INT",
+                    "name": "INT",
+                    "type": "INT",
+                    "links": links,
+                }
+            ],
+        ),
+        WorkflowPatchOperation(
+            op="set",
+            node_id=node_id,
+            path=["properties"],
+            value={"Node name for S&R": "PrimitiveInt"},
+        ),
+    ]
+
+
+def _node_output_links(node: dict[str, Any]) -> list[int | str] | None:
+    links: list[int | str] = []
+    for output in node.get("outputs") or []:
+        if not isinstance(output, dict):
+            continue
+        raw_links = output.get("links")
+        if isinstance(raw_links, list):
+            links.extend(item for item in raw_links if isinstance(item, (int, str)))
+    return links or None
+
+
+def _node_has_attached_links(data: dict[str, Any], node_id: int | str) -> bool:
+    return any(
+        _id_equal(link.get("origin_id"), node_id) or _id_equal(link.get("target_id"), node_id)
+        for link in _extract_links(data)
+    )
 
 
 def _node_by_id(data: dict[str, Any], node_id: int | str) -> dict[str, Any]:
@@ -1195,6 +1399,35 @@ def _object_info_force_input(spec: Any) -> bool:
         return False
     options = spec[1]
     return isinstance(options, dict) and bool(options.get("forceInput"))
+
+
+def _node_package(raw: dict[str, Any], node_info: dict[str, Any] | None) -> tuple[str | None, str]:
+    properties = raw.get("properties")
+    if isinstance(properties, dict):
+        cnr_id = _string_or_none(properties.get("cnr_id"))
+        if cnr_id:
+            return cnr_id, "workflow.properties.cnr_id"
+    python_module = _string_or_none(node_info.get("python_module") if node_info else None)
+    if python_module:
+        return _package_from_python_module(python_module), "object_info.python_module"
+    return None, "unknown"
+
+
+def _package_from_python_module(python_module: str) -> str:
+    if python_module == "nodes" or python_module.startswith("comfy_extras."):
+        return "comfy-core"
+    if python_module.startswith("custom_nodes."):
+        parts = python_module.split(".")
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+    return python_module
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _normalize_inputs(

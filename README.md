@@ -21,8 +21,10 @@ comfy-agent-view list
 comfy-agent-view list /path/to/other/workflows
 comfy-agent-view summarize /path/to/workflow.json --profile safe
 comfy-agent-view normalize /path/to/workflow.json --profile debug
+comfy-agent-view inspect-dependencies /path/to/workflow.json
 comfy-agent-view repair-links /path/to/workflow.json --dry-run
 comfy-agent-view diagnose-load /path/to/workflow.json
+comfy-agent-view plan-workflow-patch /path/to/workflow.json --output-path /path/to/workflow.fixed.json --patch-path /path/to/patch.json
 comfy-agent-view apply-workflow-patch /path/to/patch.json --no-dry-run
 comfy-agent-view fetch-object-info --comfy-url http://127.0.0.1:8188
 comfy-agent-view mcp
@@ -55,6 +57,12 @@ comfy-agent-view --print-object-info-path
 
 既定保存先は user config と同じディレクトリの `object_info.json`。`normalize` / `summarize` はこの既定キャッシュがあれば自動で参照し、なければ静的 fallback を使う。
 
+workflow が依存している ComfyUI 拡張や package は `inspect-dependencies` で確認できる。workflow 内の node `properties.cnr_id` と `/object_info` の `python_module` / `category` を照合し、package ごとの node 数、missing node type、node id を返す。
+
+```bash
+comfy-agent-view inspect-dependencies /path/to/workflow.json
+```
+
 ComfyUI 上で workflow 読み込みエラーになる場合は、`diagnose-load` を使う。これは workflow 静的診断、`object_info` cache、`comfyui_user_dir` 直下の `comfyui.log` / `comfyui.prev.log` / `comfyui.prev2.log` を読み、正規化された小さい診断 report を返す。log 全文や prompt 本文は返さない。
 
 ```bash
@@ -70,6 +78,15 @@ comfy-agent-view diagnose-load /path/to/workflow.json --error-report-text '...'
 ```
 
 workflow を修正する場合は、agent が workflow 本体を直接編集せず、patch spec を作って `apply-workflow-patch` に渡す。原本は読み取り専用で、修正は必ず `output` に書く。
+
+既知の安全な修正は `plan-workflow-patch` で patch spec を生成できる。初期対応は、壊れた link の削除、`INTConstant` から `PrimitiveInt` への置換、未接続 `Note` node の削除。
+
+```bash
+comfy-agent-view plan-workflow-patch /path/to/Caption.json \
+  --output-path /path/to/Caption.fixed.json \
+  --patch-path /path/to/agent-patches/Caption.patch.json
+comfy-agent-view apply-workflow-patch /path/to/agent-patches/Caption.patch.json --no-dry-run
+```
 
 ```json
 {

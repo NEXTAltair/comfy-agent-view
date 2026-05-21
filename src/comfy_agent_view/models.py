@@ -87,6 +87,36 @@ class ObjectInfoFetchResult(BaseModel):
     message: str
 
 
+class NodeDependency(BaseModel):
+    node_id: int | str
+    type: str
+    title: str | None = None
+    package: str | None = None
+    package_source: str
+    python_module: str | None = None
+    category: str | None = None
+    present_in_object_info: bool
+
+
+class PackageDependency(BaseModel):
+    package: str
+    node_count: int
+    node_types: list[str]
+    node_ids: list[int | str]
+    missing_node_types: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+
+class WorkflowDependencyResult(BaseModel):
+    format: Literal["comfy_workflow_dependencies_v1"] = "comfy_workflow_dependencies_v1"
+    source: SourceInfo
+    object_info: RuntimeObjectInfoDiagnostics
+    packages: list[PackageDependency]
+    nodes: list[NodeDependency]
+    missing_node_types: list[str] = Field(default_factory=list)
+    warnings: list[WarningItem] = Field(default_factory=list)
+
+
 class BrokenLink(BaseModel):
     link_id: int | str
     origin_id: int | str | None = None
@@ -120,6 +150,17 @@ class WorkflowPatchSpec(BaseModel):
     source: str
     output: str
     operations: list[WorkflowPatchOperation]
+
+
+class WorkflowPatchPlanResult(BaseModel):
+    format: Literal["comfy_workflow_patch_plan_v1"] = "comfy_workflow_patch_plan_v1"
+    ok: bool
+    source: SourceInfo
+    output_path: str
+    patch: WorkflowPatchSpec
+    written_path: str | None = None
+    reason: str
+    warnings: list[WarningItem] = Field(default_factory=list)
 
 
 class AppliedWorkflowPatchOperation(BaseModel):

@@ -6,7 +6,17 @@ import sys
 from typing import Any
 
 from .config import config_path, object_info_cache_path
-from .core import apply_workflow_patch, diagnose_load, fetch_object_info, list_workflows, normalize_workflow, repair_broken_links, summarize_workflow
+from .core import (
+    apply_workflow_patch,
+    diagnose_load,
+    fetch_object_info,
+    inspect_workflow_dependencies,
+    list_workflows,
+    normalize_workflow,
+    plan_workflow_patch,
+    repair_broken_links,
+    summarize_workflow,
+)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -43,6 +53,10 @@ def main(argv: list[str] | None = None) -> None:
     normalize_parser.add_argument("--comfy-url")
     normalize_parser.add_argument("--use-object-info", choices=["auto", "never", "require"], default="auto")
 
+    deps_parser = subparsers.add_parser("inspect-dependencies")
+    deps_parser.add_argument("path")
+    deps_parser.add_argument("--use-object-info", choices=["auto", "never", "require"], default="auto")
+
     repair_parser = subparsers.add_parser("repair-links")
     repair_parser.add_argument("path")
     repair_parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True)
@@ -51,6 +65,11 @@ def main(argv: list[str] | None = None) -> None:
     diagnose_parser = subparsers.add_parser("diagnose-load")
     diagnose_parser.add_argument("path")
     diagnose_parser.add_argument("--error-report-text")
+
+    plan_patch_parser = subparsers.add_parser("plan-workflow-patch")
+    plan_patch_parser.add_argument("path")
+    plan_patch_parser.add_argument("--output-path", required=True)
+    plan_patch_parser.add_argument("--patch-path")
 
     patch_parser = subparsers.add_parser("apply-workflow-patch")
     patch_parser.add_argument("patch_path")
@@ -101,6 +120,14 @@ def main(argv: list[str] | None = None) -> None:
                     comfyui_user_dir=args.comfyui_user_dir,
                 ).model_dump(mode="json")
             )
+        elif args.command == "inspect-dependencies":
+            _print(
+                inspect_workflow_dependencies(
+                    path=args.path,
+                    use_object_info=args.use_object_info,
+                    comfyui_user_dir=args.comfyui_user_dir,
+                ).model_dump(mode="json")
+            )
         elif args.command == "repair-links":
             _print(
                 repair_broken_links(
@@ -116,6 +143,15 @@ def main(argv: list[str] | None = None) -> None:
                     path=args.path,
                     comfyui_user_dir=args.comfyui_user_dir,
                     error_report_text=args.error_report_text,
+                ).model_dump(mode="json")
+            )
+        elif args.command == "plan-workflow-patch":
+            _print(
+                plan_workflow_patch(
+                    path=args.path,
+                    output_path=args.output_path,
+                    patch_path=args.patch_path,
+                    comfyui_user_dir=args.comfyui_user_dir,
                 ).model_dump(mode="json")
             )
         elif args.command == "apply-workflow-patch":
